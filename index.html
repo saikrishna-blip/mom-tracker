@@ -200,7 +200,8 @@
   <div id="editorView" class="hidden">
     <div class="toolbar">
       <button class="btn ghost" onclick="backToDashboard()">← Back to list</button>
-      <button class="btn" onclick="exportToExcel()">Export Excel (.xlsx)</button>
+      <button class="btn" onclick="exportToExcel()">Download Excel (.xlsx)</button>
+      <button class="btn primary" id="driveSaveBtn" onclick="saveToGoogleDrive()">Save to Google Drive</button>
     </div>
 
     <div class="panel header-fields">
@@ -863,8 +864,7 @@ function setCell(ws, r, c, value, style){
   ws[addr] = { t: (typeof value==='number' ? 'n' : 's'), v: value, s: style };
 }
 
-function exportToExcel(){
-  if(!currentMom || !currentMom.ref){ alert('Save at least one discussion point first.'); return; }
+function buildMomWorkbook(){
   currentMom.points.forEach(normalizePoint);
 
   const headers = ['Sl No','Category','Date','Discussion Point','DRI Name','DRI Email',
@@ -953,7 +953,96 @@ function exportToExcel(){
 
   const wb = XLSX.utils.book_new();
   XLSX.utils.book_append_sheet(wb, ws, 'MOM');
+  return wb;
+}
+
+function exportToExcel(){
+  if(!currentMom || !currentMom.ref){ alert('Save at least one discussion point first.'); return; }
+  const wb = buildMomWorkbook();
   XLSX.writeFile(wb, `${currentMom.ref}.xlsx`);
+}
+
+// ---------- Real Google Drive upload ----------
+// Uses a separate OAuth consent (drive.file scope) from Google Sign-In, since Sign-In alone
+// only proves identity and never grants file access. Requires, in Google Cloud Console:
+//   1. APIs & Services -> Library -> enable "Google Drive API"
+//   2. APIs & Services -> OAuth consent screen -> Data Access -> add scope
+//      https://www.googleapis.com/auth/drive.file
+let driveTokenClient = null;
+function getDriveTokenClient(){
+  if(driveTokenClient) return driveTokenClient;
+  if(typeof google === 'undefined' || !google.accounts || !google.accounts.oauth2) return null;
+  driveTokenClient = google.accounts.oauth2.initTokenClient({
+    client_id: GOOGLE_CLIENT_ID,
+    scope: 'https://www.googleapis.com/auth/drive.file',
+    callback: ''
+  });
+  return driveTokenClient;
+}
+function requestDriveAccessToken(){
+  return new Promise((resolve, reject)=>{
+    const client = getDriveTokenClient();
+    if(!client){ reject(new Error('Google auth library not loaded yet — try again in a moment.')); return; }
+    client.callback = (resp)=>{
+      if(resp.error){ reject(new Error(resp.error)); } else { resolve(resp.access_token); }
+    };
+    client.requestAccessToken({prompt:''});
+  });
+}
+function arrayBufferToBase64(buffer){
+  const bytes = new Uint8Array(buffer);
+  let binary = '';
+  const chunk = 0x8000;
+  for(let i=0;i<bytes.length;i+=chunk){
+    binary += String.fromCharCode.apply(null, bytes.subarray(i, i+chunk));
+  }
+  return btoa(binary);
+}
+
+async function saveToGoogleDrive(){
+  if(!currentMom || !currentMom.ref){ alert('Save at least one discussion point first.'); return; }
+  const btn = document.getElementById('driveSaveBtn');
+  const origLabel = btn.textContent;
+  btn.disabled = true; btn.textContent = 'Connecting to Drive…';
+  try{
+    const token = await requestDriveAccessToken();
+    btn.textContent = 'Uploading…';
+    const wb = buildMomWorkbook();
+    const arrBuf = XLSX.write(wb, {type:'array', bookType:'xlsx'});
+    const base64Data = arrayBufferToBase64(arrBuf);
+    const fileName = `${currentMom.ref}.xlsx`;
+    const mime = 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet';
+    const boundary = 'momtrk_' + Math.random().toString(36).slice(2);
+    const delimiter = "\r\n--"+boundary+"\r\n";
+    const closeDelim = "\r\n--"+boundary+"--";
+    const metadata = {name: fileName, mimeType: mime};
+    const body =
+      delimiter + 'Content-Type: application/json; charset=UTF-8\r\n\r\n' + JSON.stringify(metadata) +
+      delimiter + 'Content-Type: ' + mime + '\r\nContent-Transfer-Encoding: base64\r\n\r\n' + base64Data +
+      closeDelim;
+
+    const res = await fetch('https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart', {
+      method: 'POST',
+      headers: {
+        'Authorization': 'Bearer ' + token,
+        'Content-Type': 'multipart/related; boundary="' + boundary + '"'
+      },
+      body
+    });
+    const data = await res.json();
+    if(!res.ok) throw new Error((data.error && data.error.message) || 'Upload failed');
+    btn.textContent = origLabel;
+    btn.disabled = false;
+    const openLink = `https://drive.google.com/file/d/${data.id}/view`;
+    if(confirm(`Saved to your Google Drive as "${fileName}".\n\nOpen it now?`)){
+      window.open(openLink, '_blank');
+    }
+  }catch(e){
+    console.error(e);
+    btn.textContent = origLabel;
+    btn.disabled = false;
+    alert('Could not save to Google Drive:\n' + e.message + '\n\nMake sure the Google Drive API is enabled and the drive.file scope is added in your Google Cloud project. You can still use "Download Excel" in the meantime.');
+  }
 }
 </script>
 </body>
