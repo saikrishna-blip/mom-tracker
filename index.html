@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <title>MOM Tracker</title>
-<script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/xlsx-js-style@1.2.0/dist/xlsx.bundle.js"></script>
 <script src="https://accounts.google.com/gsi/client" async defer onload="initGoogleSignIn()"></script>
 <style>
   :root{
@@ -750,27 +750,114 @@ ${currentUser.name}`);
 }
 
 // ---------- Export ----------
+const THIN_BORDER = {
+  top:{style:'thin',color:{rgb:'D0D5DB'}}, bottom:{style:'thin',color:{rgb:'D0D5DB'}},
+  left:{style:'thin',color:{rgb:'D0D5DB'}}, right:{style:'thin',color:{rgb:'D0D5DB'}}
+};
+const STATUS_COLORS = {
+  Open:      {bg:'DCEBFF', fg:'1D5FAE'},
+  InProgress:{bg:'FFF1D6', fg:'A9660A'},
+  Paused:    {bg:'EDE5FF', fg:'6A4FCB'},
+  Closed:    {bg:'DFF5E8', fg:'1C8A55'}
+};
+const DAY_COLORS = {
+  over:{bg:'FBDADA', fg:'B3261E'}, soon:{bg:'FFF1D6', fg:'A9660A'},
+  ok:{bg:'DFF5E8', fg:'1C8A55'}, paused:{bg:'EDE5FF', fg:'6A4FCB'}
+};
+function cellAddr(r,c){ return XLSX.utils.encode_cell({r,c}); }
+function setCell(ws, r, c, value, style){
+  const addr = cellAddr(r,c);
+  ws[addr] = { t: (typeof value==='number' ? 'n' : 's'), v: value, s: style };
+}
+
 function exportToExcel(){
   if(!currentMom || !currentMom.ref){ alert('Save at least one discussion point first.'); return; }
-  const rows = [
-    ['Meeting Name', currentMom.meetingName],
-    ['Date & Time', currentMom.dateTime],
-    ['Meeting Attendees', currentMom.attendees],
-    ['Agenda', currentMom.agenda],
-    ['Reference', currentMom.ref],
-    [],
-    ['Sl No','Category','Date','Discussion Point','DRI Name','DRI Email','Target Date History','Current Target Date','Status','Days','DRI Replies','CHT Replies']
+  currentMom.points.forEach(normalizePoint);
+
+  const headers = ['Sl No','Category','Date','Discussion Point','DRI Name','DRI Email',
+    'Target Date History','Current Target Date','Status','Days','DRI Replies','CHT Replies'];
+  const COLS = headers.length;
+  const ws = {};
+
+  // Row 0: Title banner
+  setCell(ws,0,0,'MINUTES OF MEETING', {
+    font:{bold:true, sz:16, color:{rgb:'FFFFFF'}},
+    fill:{fgColor:{rgb:'1F2A44'}},
+    alignment:{horizontal:'left', vertical:'center'}
+  });
+  for(let c=1;c<COLS;c++) setCell(ws,0,c,'',{fill:{fgColor:{rgb:'1F2A44'}}});
+
+  // Row 1: reference stamp
+  setCell(ws,1,0, currentMom.ref, {
+    font:{bold:true, sz:11, color:{rgb:'1F2A44'}}, fill:{fgColor:{rgb:'E7EBF3'}}
+  });
+  for(let c=1;c<COLS;c++) setCell(ws,1,c,'',{fill:{fgColor:{rgb:'E7EBF3'}}});
+
+  // Rows 3-6: meeting info, two-column label/value layout
+  const infoLabelStyle = {font:{bold:true, sz:9, color:{rgb:'6B7686'}}};
+  const infoValueStyle = {font:{sz:11, color:{rgb:'1A1A1A'}}};
+  const infoRows = [
+    ['Meeting Name', currentMom.meetingName || '—', 'Date & Time', currentMom.dateTime ? new Date(currentMom.dateTime).toLocaleString('en-GB') : '—'],
+    ['Attendees', currentMom.attendees || '—', 'Agenda', currentMom.agenda || '—']
   ];
-  currentMom.points.forEach(p=>{
-    normalizePoint(p);
-    const hist = p.targetHistory.map(h=>h.date).join(' -> ');
+  let r = 3;
+  infoRows.forEach(row=>{
+    setCell(ws,r,0,row[0],infoLabelStyle);
+    setCell(ws,r,1,row[1],infoValueStyle);
+    setCell(ws,r,4,row[2],infoLabelStyle);
+    setCell(ws,r,5,row[3],infoValueStyle);
+    r++;
+  });
+
+  // Blank spacer row
+  r += 1;
+  const headerRow = r;
+  headers.forEach((h,c)=>{
+    setCell(ws,headerRow,c,h,{
+      font:{bold:true, sz:10, color:{rgb:'FFFFFF'}},
+      fill:{fgColor:{rgb:'2C3E50'}},
+      alignment:{horizontal:'center', vertical:'center', wrapText:true},
+      border:THIN_BORDER
+    });
+  });
+
+  // Data rows
+  currentMom.points.forEach((p, i)=>{
+    const rowIdx = headerRow + 1 + i;
+    const hist = p.targetHistory.map(h=>h.date).join('  ->  ');
     const cur = p.targetHistory[p.targetHistory.length-1].date;
     const tag = dayTagFor(p);
-    const driReplies = p.remarksLog.filter(r=>r.author==='DRI').map(r=>`[${fmtStamp(r.timestamp)}] ${r.text}`).join('\n');
-    const chtReplies = p.remarksLog.filter(r=>r.author==='CHT').map(r=>`[${fmtStamp(r.timestamp)}] ${r.text}`).join('\n');
-    rows.push([p.slNo,p.category,p.date,p.text,p.driName,p.driEmail,hist,cur,p.status,tag.label,driReplies,chtReplies]);
+    const driReplies = p.remarksLog.filter(x=>x.author==='DRI').map(x=>`[${fmtStamp(x.timestamp)}] ${x.text}`).join('\n');
+    const chtReplies = p.remarksLog.filter(x=>x.author==='CHT').map(x=>`[${fmtStamp(x.timestamp)}] ${x.text}`).join('\n');
+    const zebra = i % 2 === 1 ? 'F6F8FA' : 'FFFFFF';
+    const baseStyle = {font:{sz:10}, alignment:{vertical:'top', wrapText:true}, border:THIN_BORDER, fill:{fgColor:{rgb:zebra}}};
+    const centerStyle = {...baseStyle, alignment:{...baseStyle.alignment, horizontal:'center'}};
+    const statusColor = STATUS_COLORS[p.status] || STATUS_COLORS.Open;
+    const dayColor = DAY_COLORS[tag.cls] || DAY_COLORS.ok;
+
+    const values = [p.slNo, p.category, fmtDate(p.date), p.text, p.driName, p.driEmail, hist, fmtDate(cur), p.status, tag.label, driReplies, chtReplies];
+    values.forEach((v, c)=>{
+      let style = baseStyle;
+      if(c===0 || c===2 || c===7) style = centerStyle;
+      if(c===8) style = {...centerStyle, font:{bold:true, sz:10, color:{rgb:statusColor.fg}}, fill:{fgColor:{rgb:statusColor.bg}}, border:THIN_BORDER};
+      if(c===9) style = {...centerStyle, font:{bold:true, sz:10, color:{rgb:dayColor.fg}}, fill:{fgColor:{rgb:dayColor.bg}}, border:THIN_BORDER};
+      setCell(ws, rowIdx, c, v, style);
+    });
   });
-  const ws = XLSX.utils.aoa_to_sheet(rows);
+
+  const lastRow = headerRow + currentMom.points.length;
+  ws['!ref'] = XLSX.utils.encode_range({s:{r:0,c:0}, e:{r:lastRow, c:COLS-1}});
+  ws['!merges'] = [
+    {s:{r:0,c:0}, e:{r:0,c:COLS-1}},
+    {s:{r:1,c:0}, e:{r:1,c:COLS-1}}
+  ];
+  ws['!cols'] = [
+    {wch:6}, {wch:14}, {wch:11}, {wch:32}, {wch:16}, {wch:22},
+    {wch:24}, {wch:14}, {wch:12}, {wch:13}, {wch:30}, {wch:30}
+  ];
+  ws['!rows'] = [{hpt:26}, {hpt:20}];
+  ws['!autofilter'] = {ref: XLSX.utils.encode_range({s:{r:headerRow,c:0}, e:{r:lastRow, c:COLS-1}})};
+
   const wb = XLSX.utils.book_new();
   XLSX.utils.book_append_sheet(wb, ws, 'MOM');
   XLSX.writeFile(wb, `${currentMom.ref}.xlsx`);
