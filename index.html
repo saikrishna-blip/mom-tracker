@@ -1,0 +1,721 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>MOM Tracker</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
+<style>
+  :root{
+    --bg:#0f131a;
+    --panel:#171d26;
+    --panel2:#1e2530;
+    --border:#2a3241;
+    --text:#e9edf3;
+    --muted:#8a94a3;
+    --accent:#5ab1ff;
+    --accent-dim:#2a4a66;
+    --warn:#f0a840;
+    --danger:#ef5b5b;
+    --success:#46c98d;
+    --paused:#a891f5;
+    --mono: 'IBM Plex Mono', 'SFMono-Regular', Consolas, monospace;
+    --sans: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+  }
+  *{box-sizing:border-box;}
+  body{
+    margin:0; background:var(--bg); color:var(--text); font-family:var(--sans);
+    min-height:100vh;
+  }
+  .app{max-width:1200px;margin:0 auto;padding:28px 20px 60px;}
+  .topbar{display:flex;align-items:center;justify-content:space-between;margin-bottom:24px;flex-wrap:wrap;gap:12px;}
+  .brand{display:flex;align-items:center;gap:12px;}
+  .brand-stamp{
+    font-family:var(--mono); font-size:11px; letter-spacing:1.5px; color:var(--accent);
+    border:1.5px solid var(--accent); border-radius:3px; padding:4px 8px; transform:rotate(-2deg);
+  }
+  .brand h1{font-size:19px;margin:0;font-weight:700;letter-spacing:.2px;}
+  .user-chip{font-size:13px;color:var(--muted);display:flex;align-items:center;gap:8px;}
+  .user-chip b{color:var(--text);font-weight:600;}
+  .btn{
+    background:var(--panel2); color:var(--text); border:1px solid var(--border);
+    padding:8px 14px; border-radius:6px; font-size:13px; cursor:pointer; font-family:var(--sans);
+    transition:.15s; font-weight:500;
+  }
+  .btn:hover{border-color:var(--accent); color:var(--accent);}
+  .btn.primary{background:var(--accent); color:#08131f; border-color:var(--accent); font-weight:700;}
+  .btn.primary:hover{filter:brightness(1.08); color:#08131f;}
+  .btn.ghost{background:transparent;}
+  .btn.small{padding:4px 9px;font-size:12px;border-radius:5px;}
+  .btn.danger{border-color:var(--danger); color:var(--danger);}
+  .btn.danger:hover{background:var(--danger); color:#fff;}
+  .btn.success{border-color:var(--success); color:var(--success);}
+  .btn.success:hover{background:var(--success); color:#08131f;}
+  .btn.warn{border-color:var(--warn); color:var(--warn);}
+  .btn.warn:hover{background:var(--warn); color:#08131f;}
+  .btn:disabled{opacity:.4;cursor:not-allowed;}
+
+  .panel{background:var(--panel);border:1px solid var(--border);border-radius:10px;padding:20px;margin-bottom:18px;}
+  .panel h2{margin:0 0 14px;font-size:15px;color:var(--muted);text-transform:uppercase;letter-spacing:1px;font-weight:700;}
+  label{display:block;font-size:12px;color:var(--muted);margin-bottom:5px;font-weight:600;}
+  input,textarea,select{
+    width:100%; background:var(--panel2); border:1px solid var(--border); color:var(--text);
+    padding:9px 10px; border-radius:6px; font-family:var(--sans); font-size:13.5px;
+  }
+  input:focus,textarea:focus,select:focus{outline:none;border-color:var(--accent);}
+  .grid{display:grid;gap:14px;}
+  .grid.cols-2{grid-template-columns:1fr 1fr;}
+  .grid.cols-4{grid-template-columns:1.5fr 1fr 1.5fr 1fr;}
+  textarea{resize:vertical;min-height:56px;}
+
+  table{width:100%;border-collapse:collapse;font-size:13px;}
+  th{
+    text-align:left; font-size:11px; text-transform:uppercase; letter-spacing:.6px; color:var(--muted);
+    border-bottom:1px solid var(--border); padding:8px 8px; font-weight:700;
+  }
+  td{padding:10px 8px;border-bottom:1px solid var(--border);vertical-align:top;}
+  tr:last-child td{border-bottom:none;}
+  .badge{
+    display:inline-block; padding:3px 9px; border-radius:20px; font-size:11px; font-weight:700;
+    letter-spacing:.3px; font-family:var(--mono);
+  }
+  .badge.Open{background:rgba(90,177,255,.15);color:var(--accent);}
+  .badge.InProgress{background:rgba(240,168,64,.15);color:var(--warn);}
+  .badge.Paused{background:rgba(168,145,245,.15);color:var(--paused);}
+  .badge.Closed{background:rgba(70,201,141,.15);color:var(--success);}
+  .strike{color:var(--muted);text-decoration:line-through;font-family:var(--mono);font-size:11.5px;}
+  .cur-date{font-family:var(--mono);font-size:12.5px;font-weight:700;}
+  .day-tag{font-family:var(--mono);font-size:11.5px;font-weight:700;}
+  .day-tag.over{color:var(--danger);}
+  .day-tag.soon{color:var(--warn);}
+  .day-tag.ok{color:var(--success);}
+  .day-tag.paused{color:var(--paused);}
+  .remarks-cell{min-width:190px;max-width:230px;}
+  .remark-entry{border-radius:6px;padding:5px 8px;margin-bottom:5px;font-size:11.5px;line-height:1.4;}
+  .remark-entry:last-child{margin-bottom:0;}
+  .remark-entry .r-meta{font-family:var(--mono);font-size:10px;font-weight:700;letter-spacing:.4px;margin-bottom:2px;display:block;}
+  .remark-entry.CHT{background:rgba(90,177,255,.10);border:1px solid rgba(90,177,255,.25);}
+  .remark-entry.CHT .r-meta{color:var(--accent);}
+  .remark-entry.DRI{background:rgba(240,168,64,.10);border:1px solid rgba(240,168,64,.28);}
+  .remark-entry.DRI .r-meta{color:var(--warn);}
+  .remark-empty{color:var(--muted);font-size:11.5px;font-style:italic;}
+  .actions-cell{white-space:nowrap;}
+  .actions-cell .btn{margin-right:4px;margin-bottom:4px;}
+  .mom-list-item{
+    display:flex;justify-content:space-between;align-items:center;padding:12px 14px;
+    background:var(--panel2);border:1px solid var(--border);border-radius:8px;margin-bottom:8px;cursor:pointer;
+  }
+  .mom-list-item:hover{border-color:var(--accent);}
+  .mom-ref{font-family:var(--mono);color:var(--accent);font-size:12px;font-weight:700;}
+  .mom-meta{font-size:12px;color:var(--muted);margin-top:2px;}
+  .stat-pill{font-size:11px;font-family:var(--mono);padding:2px 8px;border-radius:10px;background:var(--panel);border:1px solid var(--border);margin-left:6px;}
+  .hidden{display:none !important;}
+  .login-wrap{display:flex;align-items:center;justify-content:center;min-height:90vh;}
+  .login-box{width:380px;background:var(--panel);border:1px solid var(--border);border-radius:12px;padding:32px;}
+  .login-box h1{font-size:20px;margin:0 0 4px;}
+  .login-box p{color:var(--muted);font-size:13px;margin:0 0 20px;}
+  .login-note{font-size:11.5px;color:var(--muted);margin-top:14px;line-height:1.5;border-top:1px solid var(--border);padding-top:12px;}
+  .row-gap{margin-bottom:12px;}
+  .note-banner{
+    background:rgba(240,168,64,.08); border:1px solid rgba(240,168,64,.35); color:#f0c98a;
+    font-size:12px; padding:10px 12px; border-radius:8px; margin-bottom:16px; line-height:1.5;
+  }
+  .empty{color:var(--muted);font-size:13px;padding:20px;text-align:center;}
+  .toolbar{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:16px;}
+  .points-toolbar{display:flex;justify-content:space-between;align-items:center;margin-bottom:10px;}
+  .add-point-form{background:var(--panel2);border:1px dashed var(--border);border-radius:8px;padding:14px;margin-top:14px;}
+  .header-fields{margin-bottom:4px;}
+  .ref-stamp{
+    font-family:var(--mono);border:2px solid var(--accent);color:var(--accent);
+    display:inline-block;padding:3px 10px;border-radius:4px;transform:rotate(-1.5deg);font-size:12px;font-weight:700;letter-spacing:1px;
+  }
+</style>
+</head>
+<body>
+
+<div id="loginScreen" class="login-wrap">
+  <div class="login-box">
+    <h1>MOM Tracker</h1>
+    <p>Sign in to create and follow up on Minutes of Meeting.</p>
+    <div class="row-gap">
+      <label>Your name</label>
+      <input id="loginName" placeholder="e.g. Sai Kumar">
+    </div>
+    <div class="row-gap">
+      <label>Your email ID</label>
+      <input id="loginEmail" placeholder="you@company.com" type="email">
+    </div>
+    <button class="btn primary" style="width:100%" onclick="doLogin()">Sign in</button>
+    <div class="login-note">
+      This identifies who's creating MOMs and pre-fills the "sent by" line on reminder emails.
+      It isn't password-protected authentication — anyone with this page's link can enter any name/email.
+      For real access control, this needs to run behind a proper backend.
+    </div>
+  </div>
+</div>
+
+<div id="mainApp" class="app hidden">
+  <div class="topbar">
+    <div class="brand">
+      <div class="brand-stamp">MOM&nbsp;TRK</div>
+      <h1>MOM Tracker</h1>
+    </div>
+    <div class="user-chip">Signed in as <b id="whoami"></b> <button class="btn small ghost" onclick="logout()">Switch user</button></div>
+  </div>
+
+  <div id="dashboardView">
+    <div class="note-banner">
+      Reminder emails are generated pre-filled and opened in your mail client — nothing is sent silently in the background.
+      Excel export gives you a real .xlsx to upload to Drive. This data is stored with this tool, shared with anyone using this same link.
+    </div>
+    <div class="toolbar">
+      <button class="btn primary" onclick="showCreateForm()">+ New MOM</button>
+      <button class="btn" onclick="loadDashboard()">Refresh</button>
+    </div>
+    <div class="panel">
+      <h2>Existing MOMs</h2>
+      <div id="momList"><div class="empty">Loading…</div></div>
+    </div>
+  </div>
+
+  <div id="editorView" class="hidden">
+    <div class="toolbar">
+      <button class="btn ghost" onclick="backToDashboard()">← Back to list</button>
+      <button class="btn" onclick="exportToExcel()">Export Excel (.xlsx)</button>
+    </div>
+
+    <div class="panel header-fields">
+      <h2>Meeting details</h2>
+      <span class="ref-stamp" id="refStamp">MOM-DRAFT</span>
+      <div class="grid cols-2" style="margin-top:14px;">
+        <div>
+          <label>Meeting name</label>
+          <input id="f_name" placeholder="e.g. SDMC Yellow Tint - Weekly Review">
+        </div>
+        <div>
+          <label>Date &amp; time</label>
+          <input id="f_datetime" type="datetime-local">
+        </div>
+      </div>
+      <div class="grid cols-2" style="margin-top:14px;">
+        <div>
+          <label>Meeting attendees</label>
+          <input id="f_attendees" placeholder="Comma separated names">
+        </div>
+        <div>
+          <label>Agenda</label>
+          <input id="f_agenda" placeholder="One line summary of agenda">
+        </div>
+      </div>
+    </div>
+
+    <div class="panel">
+      <div class="points-toolbar">
+        <h2 style="margin:0;">Discussion points</h2>
+        <button class="btn small primary" onclick="toggleAddPoint()">+ Add point</button>
+      </div>
+
+      <div id="addPointForm" class="add-point-form hidden">
+        <div class="grid cols-2">
+          <div><label>Category</label>
+            <input id="np_category" list="categoryOptions" placeholder="Type a category, e.g. Technical, Supplier...">
+            <datalist id="categoryOptions"></datalist>
+          </div>
+          <div><label>Date raised</label><input id="np_date" type="date"></div>
+        </div>
+        <div class="grid cols-2" style="margin-top:10px;">
+          <div>
+            <label>DRI — choose saved contact, or pick "+ New contact" below</label>
+            <select id="np_dri_select" onchange="onDriSelect()"><option value="">+ New contact...</option></select>
+          </div>
+          <div><label>Target date (applies to all points added below)</label><input id="np_target" type="date"></div>
+        </div>
+        <div class="grid cols-2" style="margin-top:10px;">
+          <div><label>DRI name</label><input id="np_driname" placeholder="Person name"></div>
+          <div><label>DRI email</label><input id="np_driemail" type="email" placeholder="dri@company.com"></div>
+        </div>
+        <div style="margin-top:10px;">
+          <label>Initial remark (optional — logged as a CHT entry with timestamp)</label>
+          <input id="np_remarks" placeholder="Optional">
+        </div>
+        <div style="margin-top:10px;">
+          <label>Discussion points — one per line, each becomes its own tracked row</label>
+          <textarea id="np_text" style="min-height:90px;" placeholder="e.g.&#10;Root cause pending from SDMC&#10;Sample lot re-inspection to be scheduled&#10;8D report revision needed"></textarea>
+        </div>
+        <div style="margin-top:10px;">
+          <button class="btn primary small" onclick="addPoint()">Add to table</button>
+          <button class="btn ghost small" onclick="toggleAddPoint()">Cancel</button>
+        </div>
+      </div>
+
+      <div style="overflow-x:auto;margin-top:14px;">
+        <table>
+          <thead><tr>
+            <th style="width:32px;">#</th><th>Category</th><th>Date</th><th style="min-width:220px;">Discussion point</th>
+            <th>DRI</th><th style="min-width:130px;">Target date</th><th>Status</th><th style="min-width:110px;">Days</th><th>Remarks log (DRI / CHT)</th><th>Actions</th>
+          </tr></thead>
+          <tbody id="pointsBody"></tbody>
+        </table>
+      </div>
+      <div id="pointsEmpty" class="empty hidden">No discussion points yet. Add one above.</div>
+    </div>
+  </div>
+</div>
+
+<script>
+let currentUser = null;
+let currentMom = null; // full object being edited
+let momIndex = {}; // ref -> summary for dashboard
+
+// Storage shim: use Claude's built-in window.storage when available (inside claude.ai),
+// otherwise fall back to this browser's localStorage so the tool still works standalone.
+const storage = (typeof window.storage !== 'undefined' && window.storage) ? window.storage : {
+  _p: 'momtrk:',
+  async get(key){
+    const v = localStorage.getItem(this._p+key);
+    if(v===null){ const e = new Error('not found'); throw e; }
+    return {key, value:v};
+  },
+  async set(key, value){
+    localStorage.setItem(this._p+key, value);
+    return {key, value};
+  },
+  async delete(key){
+    localStorage.removeItem(this._p+key);
+    return {key, deleted:true};
+  },
+  async list(prefix){
+    const keys = [];
+    for(let i=0;i<localStorage.length;i++){
+      const k = localStorage.key(i);
+      if(k && k.startsWith(this._p)){
+        const bare = k.slice(this._p.length);
+        if(!prefix || bare.startsWith(prefix)) keys.push(bare);
+      }
+    }
+    return {keys, prefix};
+  }
+};
+
+// ---------- Auth (simulated) ----------
+function doLogin(){
+  const name = document.getElementById('loginName').value.trim();
+  const email = document.getElementById('loginEmail').value.trim();
+  if(!name || !email){ alert('Enter both name and email'); return; }
+  currentUser = {name, email};
+  document.getElementById('loginScreen').classList.add('hidden');
+  document.getElementById('mainApp').classList.remove('hidden');
+  document.getElementById('whoami').textContent = `${name} <${email}>`;
+  loadDashboard();
+}
+function logout(){
+  currentUser = null;
+  document.getElementById('mainApp').classList.add('hidden');
+  document.getElementById('loginScreen').classList.remove('hidden');
+}
+
+// ---------- Utilities ----------
+function fmtDate(d){
+  if(!d) return '—';
+  const dt = new Date(d+'T00:00:00');
+  return dt.toLocaleDateString('en-GB',{day:'2-digit',month:'short',year:'numeric'});
+}
+function todayStr(){
+  return new Date().toISOString().slice(0,10);
+}
+function daysBetween(a,b){
+  const A = new Date(a+'T00:00:00'), B = new Date(b+'T00:00:00');
+  return Math.round((B-A)/86400000);
+}
+async function genRef(){
+  let counter = 1;
+  try{
+    const r = await storage.get('mom-counter', true);
+    counter = parseInt(r.value,10) + 1;
+  }catch(e){ counter = 1; }
+  await storage.set('mom-counter', String(counter), true);
+  const d = new Date();
+  const ymd = d.toISOString().slice(0,10).replace(/-/g,'');
+  return `MOM-${ymd}-${String(counter).padStart(3,'0')}`;
+}
+
+// ---------- Dashboard ----------
+async function loadDashboard(){
+  const listEl = document.getElementById('momList');
+  listEl.innerHTML = '<div class="empty">Loading…</div>';
+  try{
+    const keys = await storage.list('mom:', true);
+    if(!keys || !keys.keys || keys.keys.length===0){
+      listEl.innerHTML = '<div class="empty">No MOMs yet. Click "New MOM" to create one.</div>';
+      return;
+    }
+    const moms = [];
+    for(const k of keys.keys){
+      try{
+        const r = await storage.get(k, true);
+        moms.push(JSON.parse(r.value));
+      }catch(e){}
+    }
+    moms.sort((a,b)=> (b.createdAt||'').localeCompare(a.createdAt||''));
+    listEl.innerHTML = '';
+    moms.forEach(m=>{
+      const total = m.points.length;
+      const open = m.points.filter(p=>p.status==='Open'||p.status==='InProgress').length;
+      const overdue = m.points.filter(p=>{
+        if(p.status==='Closed'||p.status==='Paused') return false;
+        const t = p.targetHistory[p.targetHistory.length-1].date;
+        return daysBetween(todayStr(), t) < 0;
+      }).length;
+      const div = document.createElement('div');
+      div.className = 'mom-list-item';
+      div.onclick = ()=>openMom(m.ref);
+      div.innerHTML = `
+        <div>
+          <div class="mom-ref">${m.ref}</div>
+          <div style="font-weight:600;margin-top:2px;">${m.meetingName||'(untitled meeting)'}</div>
+          <div class="mom-meta">${m.dateTime ? new Date(m.dateTime).toLocaleString('en-GB') : '—'}</div>
+        </div>
+        <div>
+          <span class="stat-pill">${total} points</span>
+          <span class="stat-pill" style="color:var(--accent);">${open} open</span>
+          ${overdue>0 ? `<span class="stat-pill" style="color:var(--danger);border-color:var(--danger);">${overdue} overdue</span>` : ''}
+        </div>`;
+      listEl.appendChild(div);
+    });
+  }catch(e){
+    listEl.innerHTML = '<div class="empty">Could not load MOM log. Try refresh.</div>';
+  }
+}
+
+function showCreateForm(){
+  currentMom = {
+    ref: null, meetingName:'', dateTime:'', attendees:'', agenda:'',
+    createdBy: currentUser.email, createdByName: currentUser.name,
+    createdAt: new Date().toISOString(), points: []
+  };
+  renderEditor();
+  document.getElementById('dashboardView').classList.add('hidden');
+  document.getElementById('editorView').classList.remove('hidden');
+}
+
+async function openMom(ref){
+  try{
+    const r = await storage.get('mom:'+ref, true);
+    currentMom = JSON.parse(r.value);
+    renderEditor();
+    document.getElementById('dashboardView').classList.add('hidden');
+    document.getElementById('editorView').classList.remove('hidden');
+  }catch(e){
+    alert('Could not open this MOM.');
+  }
+}
+
+function backToDashboard(){
+  document.getElementById('editorView').classList.add('hidden');
+  document.getElementById('dashboardView').classList.remove('hidden');
+  loadDashboard();
+}
+
+// ---------- Editor ----------
+function renderEditor(){
+  document.getElementById('refStamp').textContent = currentMom.ref || 'MOM-DRAFT (saved on first point)';
+  document.getElementById('f_name').value = currentMom.meetingName || '';
+  document.getElementById('f_datetime').value = currentMom.dateTime || '';
+  document.getElementById('f_attendees').value = currentMom.attendees || '';
+  document.getElementById('f_agenda').value = currentMom.agenda || '';
+  ['f_name','f_datetime','f_attendees','f_agenda'].forEach(id=>{
+    document.getElementById(id).onchange = saveHeaderFields;
+  });
+  (currentMom.points||[]).forEach(normalizePoint);
+  renderPoints();
+}
+
+async function saveHeaderFields(){
+  currentMom.meetingName = document.getElementById('f_name').value;
+  currentMom.dateTime = document.getElementById('f_datetime').value;
+  currentMom.attendees = document.getElementById('f_attendees').value;
+  currentMom.agenda = document.getElementById('f_agenda').value;
+  await persistMom();
+}
+
+async function persistMom(){
+  if(!currentMom.ref){
+    currentMom.ref = await genRef();
+    document.getElementById('refStamp').textContent = currentMom.ref;
+  }
+  await storage.set('mom:'+currentMom.ref, JSON.stringify(currentMom), true);
+}
+
+async function toggleAddPoint(){
+  const form = document.getElementById('addPointForm');
+  form.classList.toggle('hidden');
+  if(!form.classList.contains('hidden')){
+    document.getElementById('np_date').value = todayStr();
+    await populateDriSelect();
+    populateCategoryOptions();
+  }
+}
+
+// ---------- DRI contacts (saved, reusable list) ----------
+async function loadContacts(){
+  try{
+    const r = await storage.get('dri-contacts', true);
+    return JSON.parse(r.value);
+  }catch(e){
+    return [];
+  }
+}
+async function saveContactIfNew(name, email){
+  const list = await loadContacts();
+  const exists = list.some(c => c.email.toLowerCase() === email.toLowerCase());
+  if(!exists){
+    list.push({name, email});
+    await storage.set('dri-contacts', JSON.stringify(list), true);
+  } else {
+    // keep name in sync if it changed
+    list.forEach(c=>{ if(c.email.toLowerCase()===email.toLowerCase()) c.name = name; });
+    await storage.set('dri-contacts', JSON.stringify(list), true);
+  }
+}
+async function populateDriSelect(){
+  const list = await loadContacts();
+  const sel = document.getElementById('np_dri_select');
+  sel.innerHTML = '<option value="">+ New contact...</option>' +
+    list.map(c => `<option value="${escapeHtml(c.email)}">${escapeHtml(c.name)} — ${escapeHtml(c.email)}</option>`).join('');
+}
+async function onDriSelect(){
+  const sel = document.getElementById('np_dri_select');
+  if(!sel.value){
+    document.getElementById('np_driname').value = '';
+    document.getElementById('np_driemail').value = '';
+    return;
+  }
+  const list = await loadContacts();
+  const c = list.find(x => x.email === sel.value);
+  if(c){
+    document.getElementById('np_driname').value = c.name;
+    document.getElementById('np_driemail').value = c.email;
+  }
+}
+
+// ---------- Category suggestions (typed field with datalist hints) ----------
+function populateCategoryOptions(){
+  const dl = document.getElementById('categoryOptions');
+  const cats = [...new Set((currentMom.points||[]).map(p=>p.category).filter(Boolean))];
+  dl.innerHTML = cats.map(c => `<option value="${escapeHtml(c)}"></option>`).join('');
+}
+
+async function addPoint(){
+  const rawLines = document.getElementById('np_text').value.split('\n').map(l=>l.trim()).filter(l=>l);
+  const category = document.getElementById('np_category').value.trim();
+  const driname = document.getElementById('np_driname').value.trim();
+  const driemail = document.getElementById('np_driemail').value.trim();
+  const target = document.getElementById('np_target').value;
+  if(rawLines.length===0 || !category || !driname || !driemail || !target){
+    alert('Category, at least one discussion point, DRI name, DRI email and target date are required.');
+    return;
+  }
+  const date = document.getElementById('np_date').value || todayStr();
+  const remarks = document.getElementById('np_remarks').value.trim();
+
+  rawLines.forEach(line=>{
+    const remarksLog = [];
+    if(remarks){
+      remarksLog.push({author:'CHT', text: remarks, timestamp: new Date().toISOString()});
+    }
+    currentMom.points.push({
+      slNo: currentMom.points.length + 1,
+      category,
+      date,
+      text: line,
+      driName: driname,
+      driEmail: driemail,
+      targetHistory: [{date: target, changedAt: new Date().toISOString()}],
+      status: 'Open',
+      remarksLog,
+      pausedReason: '',
+      closedAt: null,
+      createdAt: new Date().toISOString()
+    });
+  });
+
+  await saveContactIfNew(driname, driemail);
+  await persistMom();
+  ['np_text','np_driname','np_driemail','np_target','np_remarks','np_category'].forEach(id=>document.getElementById(id).value='');
+  document.getElementById('np_dri_select').value = '';
+  document.getElementById('addPointForm').classList.add('hidden');
+  renderPoints();
+}
+
+function dayTagFor(point){
+  if(point.status==='Closed'){
+    const created = point.createdAt.slice(0,10);
+    const closed = (point.closedAt||new Date().toISOString()).slice(0,10);
+    const d = daysBetween(created, closed);
+    return {label:`Closed in ${d}d`, cls:'ok'};
+  }
+  if(point.status==='Paused'){
+    return {label:'Paused', cls:'paused'};
+  }
+  const t = point.targetHistory[point.targetHistory.length-1].date;
+  const d = daysBetween(todayStr(), t);
+  if(d < 0) return {label:`${Math.abs(d)}d overdue`, cls:'over'};
+  if(d <= 2) return {label:`${d}d left`, cls:'soon'};
+  return {label:`${d}d left`, cls:'ok'};
+}
+
+function normalizePoint(p){
+  if(!p.remarksLog){
+    p.remarksLog = p.remarks ? [{author:'CHT', text:p.remarks, timestamp:p.createdAt||new Date().toISOString()}] : [];
+  }
+  return p;
+}
+
+function fmtStamp(iso){
+  const d = new Date(iso);
+  return d.toLocaleDateString('en-GB',{day:'2-digit',month:'short'}) + ', ' + d.toLocaleTimeString('en-GB',{hour:'2-digit',minute:'2-digit'});
+}
+
+function renderPoints(){
+  const body = document.getElementById('pointsBody');
+  const empty = document.getElementById('pointsEmpty');
+  body.innerHTML = '';
+  if(currentMom.points.length===0){
+    empty.classList.remove('hidden');
+    return;
+  }
+  empty.classList.add('hidden');
+  currentMom.points.forEach((p, idx)=>{
+    normalizePoint(p);
+    const tag = dayTagFor(p);
+    const histHtml = p.targetHistory.map((h,i)=>{
+      const isLast = i === p.targetHistory.length-1;
+      return isLast
+        ? `<div class="cur-date">${fmtDate(h.date)}</div>`
+        : `<div class="strike">${fmtDate(h.date)}</div>`;
+    }).join('');
+    const remarksHtml = p.remarksLog.length
+      ? p.remarksLog.map(r => `<div class="remark-entry ${r.author}"><span class="r-meta">${r.author} · ${fmtStamp(r.timestamp)}</span>${escapeHtml(r.text)}</div>`).join('')
+      : '<div class="remark-empty">No remarks yet</div>';
+    const tr = document.createElement('tr');
+    tr.innerHTML = `
+      <td>${p.slNo}</td>
+      <td>${escapeHtml(p.category)}</td>
+      <td style="white-space:nowrap;">${fmtDate(p.date)}</td>
+      <td>${escapeHtml(p.text)}</td>
+      <td>${escapeHtml(p.driName)}<br><span style="color:var(--muted);font-size:11.5px;">${escapeHtml(p.driEmail)}</span></td>
+      <td>${histHtml}</td>
+      <td><span class="badge ${p.status}">${p.status}</span>${p.status==='Paused' && p.pausedReason ? `<div style="color:var(--muted);font-size:11px;margin-top:3px;">${escapeHtml(p.pausedReason)}</div>`:''}</td>
+      <td><span class="day-tag ${tag.cls}">${tag.label}</span></td>
+      <td class="remarks-cell">${remarksHtml}</td>
+      <td class="actions-cell">
+        ${p.status!=='Closed' ? `<button class="btn small" onclick="updateTarget(${idx})">New target</button>`:''}
+        ${p.status==='Open'||p.status==='InProgress' ? `<button class="btn small warn" onclick="pausePoint(${idx})">Pause</button>`:''}
+        ${p.status==='Paused' ? `<button class="btn small" onclick="reopenPoint(${idx})">Reopen</button>`:''}
+        ${p.status!=='Closed' ? `<button class="btn small success" onclick="closePoint(${idx})">Close</button>`:''}
+        <button class="btn small" onclick="addRemark(${idx},'DRI')">+DRI reply</button>
+        <button class="btn small" onclick="addRemark(${idx},'CHT')">+CHT reply</button>
+        <button class="btn small ghost" onclick="mailtoReminder(${idx})">Remind</button>
+      </td>`;
+    body.appendChild(tr);
+  });
+}
+
+async function addRemark(idx, author){
+  const text = prompt(`Add ${author} remark (will be timestamped):`);
+  if(!text || !text.trim()) return;
+  const p = currentMom.points[idx];
+  normalizePoint(p);
+  p.remarksLog.push({author, text: text.trim(), timestamp: new Date().toISOString()});
+  await persistMom();
+  renderPoints();
+}
+
+function escapeHtml(s){
+  return (s||'').replace(/[&<>"']/g, c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+}
+
+async function updateTarget(idx){
+  const p = currentMom.points[idx];
+  const cur = p.targetHistory[p.targetHistory.length-1].date;
+  const nd = prompt(`Current target date: ${cur}\nEnter new target date (YYYY-MM-DD):`, cur);
+  if(!nd) return;
+  if(!/^\d{4}-\d{2}-\d{2}$/.test(nd)){ alert('Use format YYYY-MM-DD'); return; }
+  p.targetHistory.push({date: nd, changedAt: new Date().toISOString()});
+  if(p.status==='Open'){} // stays open
+  await persistMom();
+  renderPoints();
+}
+
+async function pausePoint(idx){
+  const reason = prompt('Reason for pausing this point:');
+  if(reason===null) return;
+  currentMom.points[idx].status = 'Paused';
+  currentMom.points[idx].pausedReason = reason;
+  await persistMom();
+  renderPoints();
+}
+
+async function reopenPoint(idx){
+  currentMom.points[idx].status = 'Open';
+  currentMom.points[idx].pausedReason = '';
+  await persistMom();
+  renderPoints();
+}
+
+async function closePoint(idx){
+  currentMom.points[idx].status = 'Closed';
+  currentMom.points[idx].closedAt = new Date().toISOString();
+  await persistMom();
+  renderPoints();
+}
+
+function mailtoReminder(idx){
+  const p = currentMom.points[idx];
+  const t = p.targetHistory[p.targetHistory.length-1].date;
+  const subject = encodeURIComponent(`Reminder: ${currentMom.ref} — action due ${fmtDate(t)}`);
+  const body = encodeURIComponent(
+`Hi ${p.driName},
+
+This is a reminder for the following open action from meeting "${currentMom.meetingName}" (${currentMom.ref}):
+
+Discussion point: ${p.text}
+Category: ${p.category}
+Target date: ${fmtDate(t)}
+Current status: ${p.status}
+
+Please update the status or reach out if you need a revised target date.
+
+Regards,
+${currentUser.name}`);
+  window.location.href = `mailto:${p.driEmail}?subject=${subject}&body=${body}`;
+}
+
+// ---------- Export ----------
+function exportToExcel(){
+  if(!currentMom || !currentMom.ref){ alert('Save at least one discussion point first.'); return; }
+  const rows = [
+    ['Meeting Name', currentMom.meetingName],
+    ['Date & Time', currentMom.dateTime],
+    ['Meeting Attendees', currentMom.attendees],
+    ['Agenda', currentMom.agenda],
+    ['Reference', currentMom.ref],
+    [],
+    ['Sl No','Category','Date','Discussion Point','DRI Name','DRI Email','Target Date History','Current Target Date','Status','Days','DRI Replies','CHT Replies']
+  ];
+  currentMom.points.forEach(p=>{
+    normalizePoint(p);
+    const hist = p.targetHistory.map(h=>h.date).join(' -> ');
+    const cur = p.targetHistory[p.targetHistory.length-1].date;
+    const tag = dayTagFor(p);
+    const driReplies = p.remarksLog.filter(r=>r.author==='DRI').map(r=>`[${fmtStamp(r.timestamp)}] ${r.text}`).join('\n');
+    const chtReplies = p.remarksLog.filter(r=>r.author==='CHT').map(r=>`[${fmtStamp(r.timestamp)}] ${r.text}`).join('\n');
+    rows.push([p.slNo,p.category,p.date,p.text,p.driName,p.driEmail,hist,cur,p.status,tag.label,driReplies,chtReplies]);
+  });
+  const ws = XLSX.utils.aoa_to_sheet(rows);
+  const wb = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(wb, ws, 'MOM');
+  XLSX.writeFile(wb, `${currentMom.ref}.xlsx`);
+}
+</script>
+</body>
+</html>
