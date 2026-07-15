@@ -4,6 +4,7 @@
 <meta charset="UTF-8">
 <title>MOM Tracker</title>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
+<script src="https://accounts.google.com/gsi/client" async defer onload="initGoogleSignIn()"></script>
 <style>
   :root{
     --bg:#0f131a;
@@ -135,20 +136,31 @@
 <div id="loginScreen" class="login-wrap">
   <div class="login-box">
     <h1>MOM Tracker</h1>
-    <p>Sign in to create and follow up on Minutes of Meeting.</p>
-    <div class="row-gap">
-      <label>Your name</label>
-      <input id="loginName" placeholder="e.g. Sai Kumar">
+    <p>Sign in with your Google account to create and follow up on Minutes of Meeting.</p>
+
+    <div id="googleBtnWrap" style="display:flex;justify-content:center;margin:14px 0;"></div>
+
+    <div id="googleNotConfigured" class="login-note hidden" style="color:var(--warn);border-color:rgba(240,168,64,.35);">
+      Google Sign-In isn't configured on this copy yet — a Google Client ID needs to be added in the code
+      (see the comment near <code>GOOGLE_CLIENT_ID</code>). Using manual sign-in below in the meantime.
     </div>
-    <div class="row-gap">
-      <label>Your email ID</label>
-      <input id="loginEmail" placeholder="you@company.com" type="email">
+
+    <div id="manualLoginFallback">
+      <div class="row-gap">
+        <label>Your name</label>
+        <input id="loginName" placeholder="e.g. Sai Kumar">
+      </div>
+      <div class="row-gap">
+        <label>Your email ID</label>
+        <input id="loginEmail" placeholder="you@company.com" type="email">
+      </div>
+      <button class="btn primary" style="width:100%" onclick="doManualLogin()">Sign in manually</button>
     </div>
-    <button class="btn primary" style="width:100%" onclick="doLogin()">Sign in</button>
+
     <div class="login-note">
-      This identifies who's creating MOMs and pre-fills the "sent by" line on reminder emails.
-      It isn't password-protected authentication — anyone with this page's link can enter any name/email.
-      For real access control, this needs to run behind a proper backend.
+      Google Sign-In confirms your Google account and reads your name and email — it doesn't need or request
+      access to your Drive, Gmail, or anything else. This is client-side verification suited to an internal
+      tool like this one, not a hardened security system.
     </div>
   </div>
 </div>
@@ -296,19 +308,66 @@ const storage = (typeof window.storage !== 'undefined' && window.storage) ? wind
   }
 };
 
-// ---------- Auth (simulated) ----------
-function doLogin(){
+// ---------- Auth ----------
+// 1. Go to https://console.cloud.google.com/apis/credentials
+// 2. Create Credentials -> OAuth client ID -> Application type: Web application
+// 3. Under "Authorized JavaScript origins" add your hosted URL, e.g. https://yourname.github.io
+// 4. Copy the Client ID it gives you and paste it below, replacing the placeholder.
+const GOOGLE_CLIENT_ID = "562234422171-r9oian7o87vkfalivc2k33vt33r90df4.apps.googleusercontent.com";
+
+function initGoogleSignIn(){
+  if(!GOOGLE_CLIENT_ID || GOOGLE_CLIENT_ID.indexOf('PASTE_YOUR') === 0){
+    document.getElementById('googleNotConfigured').classList.remove('hidden');
+    return;
+  }
+  try{
+    google.accounts.id.initialize({
+      client_id: GOOGLE_CLIENT_ID,
+      callback: handleGoogleCredential
+    });
+    google.accounts.id.renderButton(
+      document.getElementById('googleBtnWrap'),
+      {theme:'filled_black', size:'large', width:300, text:'signin_with'}
+    );
+    document.getElementById('manualLoginFallback').classList.add('hidden');
+  }catch(e){
+    document.getElementById('googleNotConfigured').classList.remove('hidden');
+  }
+}
+
+function decodeJwt(token){
+  const base64 = token.split('.')[1].replace(/-/g,'+').replace(/_/g,'/');
+  const json = decodeURIComponent(atob(base64).split('').map(c =>
+    '%' + ('00'+c.charCodeAt(0).toString(16)).slice(-2)).join(''));
+  return JSON.parse(json);
+}
+
+function handleGoogleCredential(response){
+  const payload = decodeJwt(response.credential);
+  currentUser = {name: payload.name, email: payload.email, picture: payload.picture};
+  enterApp();
+}
+
+function doManualLogin(){
   const name = document.getElementById('loginName').value.trim();
   const email = document.getElementById('loginEmail').value.trim();
   if(!name || !email){ alert('Enter both name and email'); return; }
   currentUser = {name, email};
+  enterApp();
+}
+
+function enterApp(){
   document.getElementById('loginScreen').classList.add('hidden');
   document.getElementById('mainApp').classList.remove('hidden');
-  document.getElementById('whoami').textContent = `${name} <${email}>`;
+  document.getElementById('whoami').textContent = `${currentUser.name} <${currentUser.email}>`;
   loadDashboard();
 }
+
 function logout(){
   currentUser = null;
+  if(window.google && google.accounts && google.accounts.id){
+    try{ google.accounts.id.disableAutoSelect(); }catch(e){}
+  }
   document.getElementById('mainApp').classList.add('hidden');
   document.getElementById('loginScreen').classList.remove('hidden');
 }
