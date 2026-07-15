@@ -4,6 +4,9 @@
 <meta charset="UTF-8">
 <title>MOM Tracker</title>
 <script src="https://cdn.jsdelivr.net/npm/xlsx-js-style@1.2.0/dist/xlsx.bundle.js"></script>
+<script src="https://www.gstatic.com/firebasejs/10.14.1/firebase-app-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/10.14.1/firebase-auth-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/10.14.1/firebase-firestore-compat.js"></script>
 <script src="https://accounts.google.com/gsi/client" async defer onload="initGoogleSignIn()"></script>
 <style>
   :root{
@@ -171,13 +174,18 @@
       <div class="brand-stamp">MOM&nbsp;TRK</div>
       <h1>MOM Tracker</h1>
     </div>
-    <div class="user-chip">Signed in as <b id="whoami"></b> <button class="btn small ghost" onclick="logout()">Switch user</button></div>
+    <div class="user-chip">
+      Signed in as <b id="whoami"></b>
+      <span id="storageModeBadge" style="font-family:var(--mono);font-size:11px;font-weight:700;"></span>
+      <button class="btn small ghost" onclick="logout()">Switch user</button>
+    </div>
   </div>
 
   <div id="dashboardView">
     <div class="note-banner">
       Reminder emails are generated pre-filled and opened in your mail client — nothing is sent silently in the background.
-      Excel export gives you a real .xlsx to upload to Drive. This data is stored with this tool, shared with anyone using this same link.
+      Excel export gives you a real .xlsx to upload to Drive. Check the badge next to your name above:
+      "☁ Shared (cloud)" means everyone sees the same live data; "💻 This browser only" means data is local to this device until cloud storage is configured.
     </div>
     <div class="toolbar">
       <button class="btn primary" onclick="showCreateForm()">+ New MOM</button>
@@ -278,9 +286,39 @@ let currentUser = null;
 let currentMom = null; // full object being edited
 let momIndex = {}; // ref -> summary for dashboard
 
-// Storage shim: use Claude's built-in window.storage when available (inside claude.ai),
-// otherwise fall back to this browser's localStorage so the tool still works standalone.
-const storage = (typeof window.storage !== 'undefined' && window.storage) ? window.storage : {
+// ============================================================
+// FIREBASE SETUP (shared cloud storage across every device/user)
+// 1. Go to https://console.firebase.google.com -> Add project
+//    (you can reuse the same Google Cloud project as your OAuth Client ID)
+// 2. Build -> Firestore Database -> Create database (any region close to you)
+// 3. Build -> Authentication -> Sign-in method -> enable "Anonymous"
+//    (this just lets the app satisfy security rules requiring a signed-in
+//    session; it's separate from your Google Sign-In screen for identity)
+// 4. Project settings (gear icon) -> General -> "Your apps" -> Web icon </> ->
+//    register an app -> copy the firebaseConfig object it gives you -> paste below
+// 5. Firestore Database -> Rules tab -> paste this, then Publish:
+//      rules_version = '2';
+//      service cloud.firestore {
+//        match /databases/{database}/documents {
+//          match /momtracker/{doc} {
+//            allow read, write: if request.auth != null;
+//          }
+//        }
+//      }
+// ============================================================
+const FIREBASE_CONFIG = {
+  apiKey: "AIzaSyAOJ5kt9wpK3-Op2af1sF_uS-nFJ9F883Q",
+  authDomain: "oba-inspection.firebaseapp.com",
+  projectId: "oba-inspection",
+  storageBucket: "oba-inspection.firebasestorage.app",
+  messagingSenderId: "562234422171",
+  appId: "1:562234422171:web:f03cc91f8bf7bcaa65a73e"
+};
+
+// Fallback storage: Claude's built-in window.storage when available (inside claude.ai),
+// otherwise this browser's localStorage — used only if Firestore isn't configured
+// or fails to initialize, so the tool still works standalone either way.
+const fallbackStorage = (typeof window.storage !== 'undefined' && window.storage) ? window.storage : {
   _p: 'momtrk:',
   async get(key){
     const v = localStorage.getItem(this._p+key);
@@ -307,6 +345,57 @@ const storage = (typeof window.storage !== 'undefined' && window.storage) ? wind
     return {keys, prefix};
   }
 };
+
+// Active storage backend. Starts as the fallback; upgraded to Firestore below if configured.
+let storage = fallbackStorage;
+let usingFirestore = false;
+
+function makeFirestoreStorage(db){
+  const col = db.collection('momtracker');
+  return {
+    async get(key){
+      const doc = await col.doc(key).get();
+      if(!doc.exists) throw new Error('not found');
+      return {key, value: doc.data().value};
+    },
+    async set(key, value){
+      await col.doc(key).set({value, updatedAt: firebase.firestore.FieldValue.serverTimestamp()});
+      return {key, value};
+    },
+    async delete(key){
+      await col.doc(key).delete();
+      return {key, deleted:true};
+    },
+    async list(prefix){
+      let q = col.orderBy(firebase.firestore.FieldPath.documentId());
+      if(prefix) q = q.startAt(prefix).endAt(prefix + '\uf8ff');
+      const snap = await q.get();
+      return {keys: snap.docs.map(d=>d.id)};
+    }
+  };
+}
+
+const storageReady = (async function initStorageBackend(){
+  const configured = FIREBASE_CONFIG.apiKey && FIREBASE_CONFIG.apiKey.indexOf('PASTE_YOUR') !== 0;
+  if(!configured || typeof firebase === 'undefined'){
+    return;
+  }
+  try{
+    firebase.initializeApp(FIREBASE_CONFIG);
+    await firebase.auth().signInAnonymously();
+    storage = makeFirestoreStorage(firebase.firestore());
+    usingFirestore = true;
+  }catch(e){
+    console.warn('Firestore unavailable, using local fallback storage:', e);
+  }
+})();
+
+function updateStorageBadge(){
+  const el = document.getElementById('storageModeBadge');
+  if(!el) return;
+  el.textContent = usingFirestore ? '☁ Shared (cloud)' : '💻 This browser only';
+  el.style.color = usingFirestore ? 'var(--success)' : 'var(--warn)';
+}
 
 // ---------- Auth ----------
 // 1. Go to https://console.cloud.google.com/apis/credentials
@@ -356,10 +445,12 @@ function doManualLogin(){
   enterApp();
 }
 
-function enterApp(){
+async function enterApp(){
   document.getElementById('loginScreen').classList.add('hidden');
   document.getElementById('mainApp').classList.remove('hidden');
   document.getElementById('whoami').textContent = `${currentUser.name} <${currentUser.email}>`;
+  await storageReady;
+  updateStorageBadge();
   loadDashboard();
 }
 
@@ -386,6 +477,7 @@ function daysBetween(a,b){
   return Math.round((B-A)/86400000);
 }
 async function genRef(){
+  await storageReady;
   let counter = 1;
   try{
     const r = await storage.get('mom-counter', true);
@@ -399,6 +491,7 @@ async function genRef(){
 
 // ---------- Dashboard ----------
 async function loadDashboard(){
+  await storageReady;
   const listEl = document.getElementById('momList');
   listEl.innerHTML = '<div class="empty">Loading…</div>';
   try{
