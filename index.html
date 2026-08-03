@@ -191,8 +191,15 @@
       <button class="btn primary" onclick="showCreateForm()">+ New MOM</button>
       <button class="btn" onclick="loadDashboard()">Refresh</button>
     </div>
+    <div id="dashSummary" style="margin-bottom:14px;"></div>
     <div class="panel">
-      <h2>Existing MOMs</h2>
+      <div style="display:flex;gap:10px;align-items:center;margin-bottom:14px;flex-wrap:wrap;">
+        <h2 style="margin:0;">Existing MOMs</h2>
+        <input id="momSearch" placeholder="Search by MOM name, ref, DRI, category…" style="max-width:320px;" oninput="renderMomList()">
+        <label style="display:flex;align-items:center;gap:6px;font-size:12.5px;color:var(--muted);font-weight:600;cursor:pointer;">
+          <input type="checkbox" id="overdueOnlyToggle" onchange="renderMomList()" style="width:auto;"> Overdue only
+        </label>
+      </div>
       <div id="momList"><div class="empty">Loading…</div></div>
     </div>
   </div>
@@ -206,6 +213,7 @@
         into folder: <b id="driveFolderLabel" style="color:var(--text);">MOM Tracker Records</b>
         <button class="btn small ghost" onclick="changeDriveFolder()">Change</button>
       </span>
+      <button class="btn danger" style="margin-left:auto;" onclick="deleteMomFromEditor()">Delete this MOM</button>
     </div>
 
     <div class="panel header-fields">
@@ -237,6 +245,30 @@
       <div class="points-toolbar">
         <h2 style="margin:0;">Discussion points</h2>
         <button class="btn small primary" onclick="toggleAddPoint()">+ Add point</button>
+      </div>
+
+      <div id="editPointForm" class="add-point-form hidden" style="border-color:var(--accent);">
+        <div style="font-size:11px;font-weight:700;color:var(--accent);text-transform:uppercase;letter-spacing:.6px;margin-bottom:8px;">Editing point #<span id="ep_slno"></span></div>
+        <div class="grid cols-2">
+          <div><label>Category</label><input id="ep_category" list="categoryOptions"></div>
+          <div><label>Date raised</label><input id="ep_date" type="date"></div>
+        </div>
+        <div class="grid cols-2" style="margin-top:10px;">
+          <div><label>DRI name</label><input id="ep_driname"></div>
+          <div><label>DRI email</label><input id="ep_driemail" type="email"></div>
+        </div>
+        <div style="margin-top:10px;">
+          <label>Discussion point text</label>
+          <textarea id="ep_text" style="min-height:60px;"></textarea>
+        </div>
+        <div style="margin-top:10px;">
+          <label>Target date (changing this logs a new target date, keeping history — same as "New target")</label>
+          <input id="ep_target" type="date">
+        </div>
+        <div style="margin-top:10px;">
+          <button class="btn primary small" onclick="saveEditedPoint()">Save changes</button>
+          <button class="btn ghost small" onclick="cancelEditPoint()">Cancel</button>
+        </div>
       </div>
 
       <div id="addPointForm" class="add-point-form hidden">
@@ -495,6 +527,8 @@ async function genRef(){
 }
 
 // ---------- Dashboard ----------
+let allMoms = []; // cache for client-side filtering
+
 async function loadDashboard(){
   await storageReady;
   const listEl = document.getElementById('momList');
@@ -502,6 +536,8 @@ async function loadDashboard(){
   try{
     const keys = await storage.list('mom:', true);
     if(!keys || !keys.keys || keys.keys.length===0){
+      allMoms = [];
+      document.getElementById('dashSummary').innerHTML = '';
       listEl.innerHTML = '<div class="empty">No MOMs yet. Click "New MOM" to create one.</div>';
       return;
     }
@@ -513,34 +549,104 @@ async function loadDashboard(){
       }catch(e){}
     }
     moms.sort((a,b)=> (b.createdAt||'').localeCompare(a.createdAt||''));
-    listEl.innerHTML = '';
-    moms.forEach(m=>{
-      const total = m.points.length;
-      const open = m.points.filter(p=>p.status==='Open'||p.status==='InProgress').length;
-      const overdue = m.points.filter(p=>{
-        if(p.status==='Closed'||p.status==='Paused') return false;
-        const t = p.targetHistory[p.targetHistory.length-1].date;
-        return daysBetween(todayStr(), t) < 0;
-      }).length;
-      const div = document.createElement('div');
-      div.className = 'mom-list-item';
-      div.onclick = ()=>openMom(m.ref);
-      div.innerHTML = `
-        <div>
-          <div class="mom-ref">${m.ref}</div>
-          <div style="font-weight:600;margin-top:2px;">${m.meetingName||'(untitled meeting)'}</div>
-          <div class="mom-meta">${m.dateTime ? new Date(m.dateTime).toLocaleString('en-GB') : '—'}</div>
-        </div>
-        <div>
-          <span class="stat-pill">${total} points</span>
-          <span class="stat-pill" style="color:var(--accent);">${open} open</span>
-          ${overdue>0 ? `<span class="stat-pill" style="color:var(--danger);border-color:var(--danger);">${overdue} overdue</span>` : ''}
-        </div>`;
-      listEl.appendChild(div);
-    });
+    allMoms = moms;
+    renderDashSummary();
+    renderMomList();
   }catch(e){
     listEl.innerHTML = '<div class="empty">Could not load MOM log. Try refresh.</div>';
   }
+}
+
+function momStats(m){
+  const total = m.points.length;
+  const open = m.points.filter(p=>p.status==='Open'||p.status==='InProgress').length;
+  const overdue = m.points.filter(p=>{
+    if(p.status==='Closed'||p.status==='Paused') return false;
+    const t = p.targetHistory[p.targetHistory.length-1].date;
+    return daysBetween(todayStr(), t) < 0;
+  }).length;
+  return {total, open, overdue};
+}
+
+function renderDashSummary(){
+  const el = document.getElementById('dashSummary');
+  if(!allMoms.length){ el.innerHTML=''; return; }
+  let totalPoints=0, totalOpen=0, totalOverdue=0;
+  allMoms.forEach(m=>{ const s = momStats(m); totalPoints+=s.total; totalOpen+=s.open; totalOverdue+=s.overdue; });
+  el.innerHTML = `
+    <span class="stat-pill">${allMoms.length} MOMs</span>
+    <span class="stat-pill">${totalPoints} total points</span>
+    <span class="stat-pill" style="color:var(--accent);">${totalOpen} open</span>
+    ${totalOverdue>0 ? `<span class="stat-pill" style="color:var(--danger);border-color:var(--danger);">${totalOverdue} overdue across all MOMs</span>` : ''}`;
+}
+
+function renderMomList(){
+  const listEl = document.getElementById('momList');
+  const query = (document.getElementById('momSearch').value || '').toLowerCase().trim();
+  const overdueOnly = document.getElementById('overdueOnlyToggle').checked;
+
+  let moms = allMoms;
+  if(query){
+    moms = moms.filter(m=>{
+      const haystack = [m.ref, m.meetingName, m.attendees, m.agenda, ...(m.points||[]).map(p=>p.driName+' '+p.driEmail+' '+p.category)].join(' ').toLowerCase();
+      return haystack.includes(query);
+    });
+  }
+  if(overdueOnly){
+    moms = moms.filter(m => momStats(m).overdue > 0);
+  }
+
+  if(moms.length===0){
+    listEl.innerHTML = '<div class="empty">No MOMs match this filter.</div>';
+    return;
+  }
+  listEl.innerHTML = '';
+  moms.forEach(m=>{
+    const {total, open, overdue} = momStats(m);
+    const div = document.createElement('div');
+    div.className = 'mom-list-item';
+    div.onclick = ()=>openMom(m.ref);
+    div.innerHTML = `
+      <div>
+        <div class="mom-ref">${m.ref}</div>
+        <div style="font-weight:600;margin-top:2px;">${escapeHtml(m.meetingName||'(untitled meeting)')}</div>
+        <div class="mom-meta">${m.dateTime ? new Date(m.dateTime).toLocaleString('en-GB') : '—'}</div>
+      </div>
+      <div style="display:flex;align-items:center;">
+        <span class="stat-pill">${total} points</span>
+        <span class="stat-pill" style="color:var(--accent);">${open} open</span>
+        ${overdue>0 ? `<span class="stat-pill" style="color:var(--danger);border-color:var(--danger);">${overdue} overdue</span>` : ''}
+        <button class="btn small ghost" onclick="event.stopPropagation(); duplicateMom('${m.ref}')" title="Start a new MOM copied from this one">Duplicate</button>
+        <button class="btn small danger" onclick="event.stopPropagation(); deleteMom('${m.ref}')">Delete</button>
+      </div>`;
+    listEl.appendChild(div);
+  });
+}
+
+async function deleteMom(ref){
+  const m = allMoms.find(x=>x.ref===ref);
+  const label = m ? `"${m.meetingName || ref}" (${ref})` : ref;
+  if(!confirm(`Delete ${label}? This removes it and its full discussion log permanently — this can't be undone.`)) return;
+  await storage.delete('mom:'+ref, true);
+  loadDashboard();
+}
+
+async function duplicateMom(ref){
+  const src = allMoms.find(x=>x.ref===ref);
+  if(!src) return;
+  const clone = {
+    ref: null,
+    meetingName: src.meetingName,
+    dateTime: '',
+    attendees: src.attendees,
+    agenda: src.agenda,
+    createdBy: currentUser.email, createdByName: currentUser.name,
+    createdAt: new Date().toISOString(),
+    points: []
+  };
+  currentMom = clone;
+  await persistMom();
+  openMom(currentMom.ref);
 }
 
 function showCreateForm(){
@@ -564,6 +670,18 @@ async function openMom(ref){
   }catch(e){
     alert('Could not open this MOM.');
   }
+}
+
+async function deleteMomFromEditor(){
+  if(!currentMom || !currentMom.ref){
+    // unsaved draft with no points yet — just leave without saving anything
+    backToDashboard();
+    return;
+  }
+  if(!confirm(`Delete "${currentMom.meetingName || currentMom.ref}" (${currentMom.ref})? This removes it and its full discussion log permanently — this can't be undone.`)) return;
+  await storage.delete('mom:'+currentMom.ref, true);
+  currentMom = null;
+  backToDashboard();
 }
 
 function backToDashboard(){
@@ -766,6 +884,7 @@ function renderPoints(){
       <td><span class="day-tag ${tag.cls}">${tag.label}</span></td>
       <td class="remarks-cell">${remarksHtml}</td>
       <td class="actions-cell">
+        <button class="btn small" onclick="editPoint(${idx})">Edit</button>
         ${p.status!=='Closed' ? `<button class="btn small" onclick="updateTarget(${idx})">New target</button>`:''}
         ${p.status==='Open'||p.status==='InProgress' ? `<button class="btn small warn" onclick="pausePoint(${idx})">Pause</button>`:''}
         ${p.status==='Paused' ? `<button class="btn small" onclick="reopenPoint(${idx})">Reopen</button>`:''}
@@ -773,9 +892,71 @@ function renderPoints(){
         <button class="btn small" onclick="addRemark(${idx},'DRI')">+DRI reply</button>
         <button class="btn small" onclick="addRemark(${idx},'CHT')">+CHT reply</button>
         <button class="btn small ghost" onclick="mailtoReminder(${idx})">Remind</button>
+        <button class="btn small danger" onclick="deletePoint(${idx})">Delete</button>
       </td>`;
     body.appendChild(tr);
   });
+}
+
+let editingIndex = null;
+
+function editPoint(idx){
+  document.getElementById('addPointForm').classList.add('hidden');
+  editingIndex = idx;
+  const p = currentMom.points[idx];
+  document.getElementById('ep_slno').textContent = p.slNo;
+  document.getElementById('ep_category').value = p.category;
+  document.getElementById('ep_date').value = p.date;
+  document.getElementById('ep_driname').value = p.driName;
+  document.getElementById('ep_driemail').value = p.driEmail;
+  document.getElementById('ep_text').value = p.text;
+  document.getElementById('ep_target').value = p.targetHistory[p.targetHistory.length-1].date;
+  populateCategoryOptions();
+  document.getElementById('editPointForm').classList.remove('hidden');
+  document.getElementById('editPointForm').scrollIntoView({behavior:'smooth', block:'center'});
+}
+
+function cancelEditPoint(){
+  editingIndex = null;
+  document.getElementById('editPointForm').classList.add('hidden');
+}
+
+async function saveEditedPoint(){
+  if(editingIndex === null) return;
+  const p = currentMom.points[editingIndex];
+  const category = document.getElementById('ep_category').value.trim();
+  const date = document.getElementById('ep_date').value;
+  const driname = document.getElementById('ep_driname').value.trim();
+  const driemail = document.getElementById('ep_driemail').value.trim();
+  const text = document.getElementById('ep_text').value.trim();
+  const newTarget = document.getElementById('ep_target').value;
+  if(!category || !date || !driname || !driemail || !text || !newTarget){
+    alert('All fields are required.');
+    return;
+  }
+  p.category = category;
+  p.date = date;
+  p.driName = driname;
+  p.driEmail = driemail;
+  p.text = text;
+  const currentTarget = p.targetHistory[p.targetHistory.length-1].date;
+  if(newTarget !== currentTarget){
+    p.targetHistory.push({date: newTarget, changedAt: new Date().toISOString()});
+  }
+  await saveContactIfNew(driname, driemail);
+  await persistMom();
+  editingIndex = null;
+  document.getElementById('editPointForm').classList.add('hidden');
+  renderPoints();
+}
+
+async function deletePoint(idx){
+  const p = currentMom.points[idx];
+  if(!confirm(`Delete this discussion point?\n\n"${p.text}"\n\nThis removes its full history and remarks log — this can't be undone.`)) return;
+  currentMom.points.splice(idx, 1);
+  currentMom.points.forEach((pt, i) => pt.slNo = i + 1); // renumber
+  await persistMom();
+  renderPoints();
 }
 
 async function addRemark(idx, author){
