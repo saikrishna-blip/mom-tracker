@@ -240,8 +240,28 @@
         </div>
       </div>
       <div style="margin-top:14px;">
-        <label>Linked email thread (optional) — automatic reminders will reply inside this existing Gmail conversation instead of starting a new one</label>
-        <input id="f_thread_query" placeholder='Gmail search to find it, e.g. subject:"after-sales matters" or a unique phrase from the subject line'>
+        <label>Linked email conversation (optional) — automatic reminders reply inside this existing conversation instead of starting a new one</label>
+        <div id="threadLinkDisplay" style="font-size:13px;color:var(--muted);margin:6px 0;">Not linked to any conversation.</div>
+        <button class="btn small primary" onclick="openThreadPicker()">Pick from inbox</button>
+        <button class="btn small danger hidden" id="unlinkThreadBtn" onclick="unlinkThread()">Unlink</button>
+        <details style="margin-top:8px;">
+          <summary style="cursor:pointer;font-size:11.5px;color:var(--muted);">Advanced: paste a Gmail search phrase instead</summary>
+          <input id="f_thread_query" style="margin-top:6px;" placeholder='e.g. subject:"after-sales matters"'>
+        </details>
+      </div>
+    </div>
+
+    <div id="threadPickerModal" class="hidden" style="position:fixed;inset:0;background:rgba(0,0,0,.65);z-index:1000;display:flex;align-items:center;justify-content:center;padding:20px;">
+      <div style="background:var(--panel);border:1px solid var(--border);border-radius:10px;padding:20px;width:640px;max-width:100%;max-height:82vh;overflow-y:auto;">
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px;">
+          <h2 style="margin:0;">Pick an email conversation</h2>
+          <button class="btn small ghost" onclick="closeThreadPicker()">Close</button>
+        </div>
+        <div style="display:flex;gap:8px;margin-bottom:12px;">
+          <input id="threadSearchBox" placeholder="Search your inbox… (leave blank for recent)" onkeydown="if(event.key==='Enter'){ event.preventDefault(); searchThreads(); }">
+          <button class="btn small" onclick="searchThreads()">Search</button>
+        </div>
+        <div id="threadPickerResults"></div>
       </div>
     </div>
 
@@ -703,6 +723,7 @@ function renderEditor(){
   document.getElementById('f_attendees').value = currentMom.attendees || '';
   document.getElementById('f_agenda').value = currentMom.agenda || '';
   document.getElementById('f_thread_query').value = currentMom.linkedThreadQuery || '';
+  updateThreadLinkDisplay();
   ['f_name','f_datetime','f_attendees','f_agenda','f_thread_query'].forEach(id=>{
     document.getElementById(id).onchange = saveHeaderFields;
   });
@@ -1185,6 +1206,117 @@ function requestDriveAccessToken(){
     client.requestAccessToken({prompt:''});
   });
 }
+// ---------- Gmail conversation picker ----------
+// Uses a separate OAuth consent (gmail.readonly scope) from Google Sign-In, so you can browse
+// and pick an existing conversation to link, without ever typing an email address or search syntax.
+// Requires, in Google Cloud Console: OAuth consent screen -> Data Access -> add scope
+//   https://www.googleapis.com/auth/gmail.readonly
+let gmailTokenClient = null;
+function getGmailTokenClient(){
+  if(gmailTokenClient) return gmailTokenClient;
+  if(typeof google === 'undefined' || !google.accounts || !google.accounts.oauth2) return null;
+  gmailTokenClient = google.accounts.oauth2.initTokenClient({
+    client_id: GOOGLE_CLIENT_ID,
+    scope: 'https://www.googleapis.com/auth/gmail.readonly',
+    callback: ''
+  });
+  return gmailTokenClient;
+}
+function requestGmailAccessToken(){
+  return new Promise((resolve, reject)=>{
+    const client = getGmailTokenClient();
+    if(!client){ reject(new Error('Google auth library not loaded yet — try again in a moment.')); return; }
+    client.callback = (resp)=>{
+      if(resp.error){ reject(new Error(resp.error)); } else { resolve(resp.access_token); }
+    };
+    client.requestAccessToken({prompt:''});
+  });
+}
+
+function openThreadPicker(){
+  document.getElementById('threadPickerModal').classList.remove('hidden');
+  document.getElementById('threadSearchBox').value = '';
+  searchThreads();
+}
+function closeThreadPicker(){
+  document.getElementById('threadPickerModal').classList.add('hidden');
+}
+
+async function searchThreads(){
+  const listEl = document.getElementById('threadPickerResults');
+  listEl.innerHTML = '<div class="empty">Loading…</div>';
+  try{
+    const token = await requestGmailAccessToken();
+    const typed = document.getElementById('threadSearchBox').value.trim();
+    const query = typed || 'in:inbox';
+    const listRes = await fetch('https://gmail.googleapis.com/gmail/v1/users/me/threads?maxResults=20&q=' + encodeURIComponent(query), {
+      headers: {'Authorization': 'Bearer ' + token}
+    });
+    const listData = await listRes.json();
+    if(!listRes.ok) throw new Error((listData.error && listData.error.message) || 'Could not load conversations');
+    const threads = listData.threads || [];
+    if(threads.length === 0){
+      listEl.innerHTML = '<div class="empty">No conversations found.</div>';
+      return;
+    }
+    const metas = await Promise.all(threads.map(t =>
+      fetch('https://gmail.googleapis.com/gmail/v1/users/me/threads/' + t.id + '?format=metadata&metadataHeaders=Subject&metadataHeaders=From', {
+        headers: {'Authorization': 'Bearer ' + token}
+      }).then(r => r.json())
+    ));
+    listEl.innerHTML = '';
+    metas.forEach(m => {
+      if(!m.messages || !m.messages.length) return;
+      const lastMsg = m.messages[m.messages.length - 1];
+      const headers = (lastMsg.payload && lastMsg.payload.headers) || [];
+      const subject = (headers.find(h => h.name === 'Subject') || {}).value || '(no subject)';
+      const from = (headers.find(h => h.name === 'From') || {}).value || '';
+      const snippet = m.snippet || '';
+      const row = document.createElement('div');
+      row.style.cssText = 'padding:10px 12px;border:1px solid var(--border);border-radius:8px;margin-bottom:8px;cursor:pointer;transition:.15s;';
+      row.onmouseenter = () => row.style.borderColor = 'var(--accent)';
+      row.onmouseleave = () => row.style.borderColor = 'var(--border)';
+      row.innerHTML =
+        '<div style="font-weight:600;font-size:13px;">' + escapeHtml(subject) + '</div>' +
+        '<div style="font-size:11.5px;color:var(--muted);margin-top:2px;">' + escapeHtml(from) + '</div>' +
+        '<div style="font-size:11.5px;color:var(--muted);margin-top:4px;">' + escapeHtml(snippet) + '</div>';
+      row.onclick = () => selectThread(m.id, subject);
+      listEl.appendChild(row);
+    });
+  }catch(e){
+    listEl.innerHTML = '<div class="empty">Could not load conversations: ' + escapeHtml(e.message) + '</div>';
+  }
+}
+
+async function selectThread(threadId, subject){
+  currentMom.linkedThreadId = threadId;
+  currentMom.linkedThreadSubject = subject;
+  currentMom.linkedThreadQuery = ''; // exact ID now — no need for the search fallback
+  await persistMom();
+  updateThreadLinkDisplay();
+  closeThreadPicker();
+}
+
+async function unlinkThread(){
+  currentMom.linkedThreadId = null;
+  currentMom.linkedThreadSubject = '';
+  await persistMom();
+  updateThreadLinkDisplay();
+}
+
+function updateThreadLinkDisplay(){
+  const el = document.getElementById('threadLinkDisplay');
+  const unlinkBtn = document.getElementById('unlinkThreadBtn');
+  if(!el) return;
+  if(currentMom.linkedThreadId){
+    el.innerHTML = '🔗 Linked to: <b style="color:var(--text);">' + escapeHtml(currentMom.linkedThreadSubject || '(conversation)') + '</b>';
+    unlinkBtn.classList.remove('hidden');
+  } else {
+    el.textContent = 'Not linked to any conversation.';
+    unlinkBtn.classList.add('hidden');
+  }
+}
+
 function arrayBufferToBase64(buffer){
   const bytes = new Uint8Array(buffer);
   let binary = '';
