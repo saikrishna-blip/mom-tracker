@@ -239,6 +239,10 @@
           <input id="f_agenda" placeholder="One line summary of agenda">
         </div>
       </div>
+      <div style="margin-top:14px;">
+        <label>Linked email thread (optional) — automatic reminders will reply inside this existing Gmail conversation instead of starting a new one</label>
+        <input id="f_thread_query" placeholder='Gmail search to find it, e.g. subject:"after-sales matters" or a unique phrase from the subject line'>
+      </div>
     </div>
 
     <div class="panel">
@@ -698,7 +702,8 @@ function renderEditor(){
   document.getElementById('f_datetime').value = currentMom.dateTime || '';
   document.getElementById('f_attendees').value = currentMom.attendees || '';
   document.getElementById('f_agenda').value = currentMom.agenda || '';
-  ['f_name','f_datetime','f_attendees','f_agenda'].forEach(id=>{
+  document.getElementById('f_thread_query').value = currentMom.linkedThreadQuery || '';
+  ['f_name','f_datetime','f_attendees','f_agenda','f_thread_query'].forEach(id=>{
     document.getElementById(id).onchange = saveHeaderFields;
   });
   (currentMom.points||[]).forEach(normalizePoint);
@@ -710,6 +715,11 @@ async function saveHeaderFields(){
   currentMom.dateTime = document.getElementById('f_datetime').value;
   currentMom.attendees = document.getElementById('f_attendees').value;
   currentMom.agenda = document.getElementById('f_agenda').value;
+  const newQuery = document.getElementById('f_thread_query').value;
+  if(newQuery !== currentMom.linkedThreadQuery){
+    currentMom.linkedThreadQuery = newQuery;
+    currentMom.linkedThreadId = null; // query changed — forget any previously matched thread, re-resolve next send
+  }
   await persistMom();
 }
 
