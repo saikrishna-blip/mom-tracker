@@ -218,6 +218,9 @@
         Loading status…
       </div>
 
+      <label>Email loop — exact name of your existing Google Contacts group. Everyone in it gets CC'd, on both automatic and manual sends. No addresses are ever typed anywhere in this app.</label>
+      <input id="rs_ccGroupName" placeholder="e.g. MOM Reminder Loop" class="row-gap">
+
       <label>Schedule label (informational — set this to match what you configured in Apps Script)</label>
       <input id="rs_scheduleLabel" placeholder="e.g. 9:00 AM IST, daily" class="row-gap">
 
@@ -237,7 +240,7 @@
 
       <button class="btn primary" onclick="saveReminderSettingsForm()">Save settings</button>
       <div style="margin-top:14px;font-size:11.5px;color:var(--muted);line-height:1.5;border-top:1px solid var(--border);padding-top:12px;">
-        Note: the actual time-of-day the check runs (e.g. 9am) and which Google Contacts group gets CC'd are set inside the Apps Script itself (<code>atHour(...)</code> and <code>EMAIL_LOOP_GROUP_NAME</code>) — those need a script edit + re-running <code>setupDailyTrigger</code> to change, they can't be edited from here.
+        Note: only the actual time-of-day the check runs (e.g. 9am) stays inside the Apps Script itself (<code>atHour(...)</code>) — that needs a script edit + re-running <code>setupDailyTrigger</code> to change. Everything else here, including the email loop, is shared and takes effect immediately.
       </div>
     </div>
   </div>
@@ -272,8 +275,8 @@
         <label>Closing paragraph</label>
         <textarea id="preview_closing" style="min-height:50px;" class="row-gap" oninput="updatePreviewBodyLive()"></textarea>
 
-        <label>Additional CC (optional, comma separated) — the automatic script also CCs your configured Contacts group; a manual send from here only CCs what you type here</label>
-        <input id="preview_cc" placeholder="optional, e.g. someone@company.com" class="row-gap">
+        <label>CC — resolved automatically from your email loop (Google Contacts group), same one the automatic script uses</label>
+        <div id="preview_cc_display" style="font-size:13px;color:var(--muted);background:var(--panel2);border:1px solid var(--border);border-radius:6px;padding:9px 10px;margin-bottom:12px;">Loading…</div>
 
         <div id="previewBody" style="background:#ffffff;border-radius:8px;padding:16px;color:#1a1a1a;margin-top:6px;"></div>
 
@@ -1151,6 +1154,7 @@ const REMINDER_CONFIG_DEFAULTS = {
   emailClosing: 'Sent automatically by MOM Tracker on behalf of {createdByName}.',
   repeatEveryDays: 1,
   scheduleLabel: '9:00 AM IST, daily',
+  ccGroupName: 'MOM Reminder Loop',
   lastRunAt: null
 };
 
@@ -1223,6 +1227,72 @@ function buildDigestHtml(mom, config){
   return { html, overdueCount, driEmails, enriched };
 }
 
+// ---------- Email loop resolution (Google Contacts group, via People API) ----------
+// Separate OAuth consent (contacts.readonly scope) — same group name as the Apps Script uses,
+// read live from Google Contacts each time, so no addresses are ever typed or stored here.
+let contactsTokenClient = null;
+function getContactsTokenClient(){
+  if(contactsTokenClient) return contactsTokenClient;
+  if(typeof google === 'undefined' || !google.accounts || !google.accounts.oauth2) return null;
+  contactsTokenClient = google.accounts.oauth2.initTokenClient({
+    client_id: GOOGLE_CLIENT_ID,
+    scope: 'https://www.googleapis.com/auth/contacts.readonly',
+    callback: ''
+  });
+  return contactsTokenClient;
+}
+function requestContactsToken(){
+  return new Promise((resolve, reject) => {
+    const client = getContactsTokenClient();
+    if(!client){ reject(new Error('Google auth library not loaded yet — try again in a moment.')); return; }
+    client.callback = (resp) => {
+      if(resp.error){ reject(new Error(resp.error)); } else { resolve(resp.access_token); }
+    };
+    client.requestAccessToken({prompt:''});
+  });
+}
+
+async function resolveEmailLoopAddresses(groupName){
+  if(!groupName) return [];
+  const token = await requestContactsToken();
+
+  const groupsRes = await fetch('https://people.googleapis.com/v1/contactGroups?pageSize=200', {
+    headers: {'Authorization': 'Bearer ' + token}
+  });
+  const groupsData = await groupsRes.json();
+  if(!groupsRes.ok) throw new Error((groupsData.error && groupsData.error.message) || 'Could not list Contacts groups');
+  const match = (groupsData.contactGroups || []).find(g => (g.name || '').toLowerCase() === groupName.toLowerCase());
+  if(!match) return [];
+
+  const detailRes = await fetch('https://people.googleapis.com/v1/' + match.resourceName + '?maxMembers=1000', {
+    headers: {'Authorization': 'Bearer ' + token}
+  });
+  const detailData = await detailRes.json();
+  if(!detailRes.ok) throw new Error((detailData.error && detailData.error.message) || 'Could not read group members');
+  const memberIds = detailData.memberResourceNames || [];
+  if(memberIds.length === 0) return [];
+
+  const emails = [];
+  for(let i = 0; i < memberIds.length; i += 200){
+    const chunk = memberIds.slice(i, i + 200);
+    const params = chunk.map(id => 'resourceNames=' + encodeURIComponent(id)).join('&');
+    const peopleRes = await fetch('https://people.googleapis.com/v1/people:batchGet?' + params + '&personFields=emailAddresses', {
+      headers: {'Authorization': 'Bearer ' + token}
+    });
+    const peopleData = await peopleRes.json();
+    if(peopleRes.ok && peopleData.responses){
+      peopleData.responses.forEach(r => {
+        if(r.person && r.person.emailAddresses && r.person.emailAddresses.length){
+          emails.push(r.person.emailAddresses[0].value);
+        }
+      });
+    }
+  }
+  return [...new Set(emails)];
+}
+
+let currentPreviewLoopEmails = [];
+
 async function previewReminderEmail(){
   if(!currentMom || !currentMom.ref){ alert('Save at least one discussion point first.'); return; }
   const config = await getReminderConfig();
@@ -1232,19 +1302,29 @@ async function previewReminderEmail(){
   document.getElementById('preview_subject').value = subject;
   document.getElementById('preview_intro').value = substitutePlaceholders(config.emailIntro, currentMom);
   document.getElementById('preview_closing').value = substitutePlaceholders(config.emailClosing, currentMom);
-  document.getElementById('preview_cc').value = '';
 
   const metaEl = document.getElementById('previewMeta');
   const willSend = overdueCount > 0;
   metaEl.innerHTML =
     '<b style="color:var(--text);">To:</b> ' + (driEmails.length ? escapeHtml(driEmails.join(', ')) : '(no DRI emails on open points)') + '<br>' +
-    '<b style="color:var(--text);">Automatic CC (scheduled sends only):</b> resolved from your configured Google Contacts group<br>' +
     (currentMom.linkedThreadId
       ? '<b style="color:var(--text);">Delivery:</b> replies inside "' + escapeHtml(currentMom.linkedThreadSubject || 'linked conversation') + '"<br>'
       : '<b style="color:var(--text);">Delivery:</b> sent as a new email (no conversation linked)<br>') +
     (willSend
       ? '<span style="color:var(--success);">✓ This MOM currently qualifies for the automatic send — ' + overdueCount + ' point(s) overdue.</span>'
       : '<span style="color:var(--warn);">⚠ Nothing is overdue yet, so the automatic script wouldn\'t send this on its own — but "Send Now" below will send it immediately regardless.</span>');
+
+  const ccDisplay = document.getElementById('preview_cc_display');
+  ccDisplay.textContent = 'Loading loop "' + config.ccGroupName + '"…';
+  currentPreviewLoopEmails = [];
+  try{
+    currentPreviewLoopEmails = await resolveEmailLoopAddresses(config.ccGroupName);
+    ccDisplay.textContent = currentPreviewLoopEmails.length
+      ? currentPreviewLoopEmails.join(', ')
+      : '(loop "' + config.ccGroupName + '" has no members, or wasn\'t found in your Contacts)';
+  }catch(e){
+    ccDisplay.textContent = 'Could not resolve loop: ' + e.message;
+  }
 
   updatePreviewBodyLive();
   document.getElementById('reminderPreviewModal').classList.remove('hidden');
@@ -1358,7 +1438,7 @@ async function sendReminderNow(){
     if(driEmails.length === 0){ throw new Error('No DRI emails found on open points.'); }
 
     let subject = document.getElementById('preview_subject').value.trim();
-    const ccInput = document.getElementById('preview_cc').value.trim();
+    const ccInput = currentPreviewLoopEmails.join(',');
     let inReplyTo = '', references = '', threadId = null;
 
     if(currentMom.linkedThreadId){
@@ -1408,6 +1488,7 @@ async function sendReminderNow(){
 
 async function openReminderSettings(){
   const config = await getReminderConfig();
+  document.getElementById('rs_ccGroupName').value = config.ccGroupName;
   document.getElementById('rs_scheduleLabel').value = config.scheduleLabel;
   document.getElementById('rs_repeatDays').value = String(config.repeatEveryDays);
   document.getElementById('rs_intro').value = config.emailIntro;
@@ -1428,12 +1509,13 @@ function closeReminderSettings(){
 }
 async function saveReminderSettingsForm(){
   const config = await getReminderConfig();
+  config.ccGroupName = document.getElementById('rs_ccGroupName').value.trim() || REMINDER_CONFIG_DEFAULTS.ccGroupName;
   config.scheduleLabel = document.getElementById('rs_scheduleLabel').value.trim() || REMINDER_CONFIG_DEFAULTS.scheduleLabel;
   config.repeatEveryDays = parseInt(document.getElementById('rs_repeatDays').value, 10) || 1;
   config.emailIntro = document.getElementById('rs_intro').value;
   config.emailClosing = document.getElementById('rs_closing').value;
   await saveReminderConfig(config);
-  alert('Saved. The next automatic run will use this wording — no script changes needed.');
+  alert('Saved. The next automatic run — and any manual "Send Now" — will use this, including the email loop. No script changes needed.');
   closeReminderSettings();
 }
 function cellAddr(r,c){ return XLSX.utils.encode_cell({r,c}); }
