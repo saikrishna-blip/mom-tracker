@@ -256,13 +256,32 @@
     </div>
 
     <div id="reminderPreviewModal" class="hidden" style="position:fixed;inset:0;background:rgba(0,0,0,.65);z-index:1000;display:flex;align-items:center;justify-content:center;padding:20px;">
-      <div style="background:var(--panel);border:1px solid var(--border);border-radius:10px;padding:20px;width:720px;max-width:100%;max-height:88vh;overflow-y:auto;">
+      <div style="background:var(--panel);border:1px solid var(--border);border-radius:10px;padding:20px;width:760px;max-width:100%;max-height:90vh;overflow-y:auto;">
         <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px;">
           <h2 style="margin:0;">Reminder email preview</h2>
           <button class="btn small ghost" onclick="closeReminderPreview()">Close</button>
         </div>
         <div id="previewMeta" style="font-size:12.5px;color:var(--muted);margin:8px 0 14px;line-height:1.6;"></div>
-        <div id="previewBody" style="background:#ffffff;border-radius:8px;padding:16px;color:#1a1a1a;"></div>
+
+        <label>Subject</label>
+        <input id="preview_subject" class="row-gap">
+
+        <label>Opening paragraph — edits here apply to this send; use "Save as default" to also update future automatic emails</label>
+        <textarea id="preview_intro" style="min-height:70px;" class="row-gap" oninput="updatePreviewBodyLive()"></textarea>
+
+        <label>Closing paragraph</label>
+        <textarea id="preview_closing" style="min-height:50px;" class="row-gap" oninput="updatePreviewBodyLive()"></textarea>
+
+        <label>Additional CC (optional, comma separated) — the automatic script also CCs your configured Contacts group; a manual send from here only CCs what you type here</label>
+        <input id="preview_cc" placeholder="optional, e.g. someone@company.com" class="row-gap">
+
+        <div id="previewBody" style="background:#ffffff;border-radius:8px;padding:16px;color:#1a1a1a;margin-top:6px;"></div>
+
+        <div style="margin-top:16px;display:flex;gap:8px;flex-wrap:wrap;">
+          <button class="btn primary" id="previewSendBtn" onclick="sendReminderNow()">Send Now</button>
+          <button class="btn" onclick="saveWordingAsDefault()">Save wording as default</button>
+          <button class="btn ghost" onclick="closeReminderPreview()">Close without sending</button>
+        </div>
       </div>
     </div>
 
@@ -1207,27 +1226,184 @@ function buildDigestHtml(mom, config){
 async function previewReminderEmail(){
   if(!currentMom || !currentMom.ref){ alert('Save at least one discussion point first.'); return; }
   const config = await getReminderConfig();
-  const { html, overdueCount, driEmails } = buildDigestHtml(currentMom, config);
+  const { overdueCount, driEmails } = buildDigestHtml(currentMom, config);
   const subject = 'MOM Update Needed: ' + currentMom.ref + ' — ' + overdueCount + ' point(s) overdue';
+
+  document.getElementById('preview_subject').value = subject;
+  document.getElementById('preview_intro').value = substitutePlaceholders(config.emailIntro, currentMom);
+  document.getElementById('preview_closing').value = substitutePlaceholders(config.emailClosing, currentMom);
+  document.getElementById('preview_cc').value = '';
 
   const metaEl = document.getElementById('previewMeta');
   const willSend = overdueCount > 0;
   metaEl.innerHTML =
-    '<b style="color:var(--text);">Subject:</b> ' + escapeHtml(subject) + '<br>' +
     '<b style="color:var(--text);">To:</b> ' + (driEmails.length ? escapeHtml(driEmails.join(', ')) : '(no DRI emails on open points)') + '<br>' +
-    '<b style="color:var(--text);">CC:</b> resolved automatically at send time from your configured Google Contacts group<br>' +
+    '<b style="color:var(--text);">Automatic CC (scheduled sends only):</b> resolved from your configured Google Contacts group<br>' +
     (currentMom.linkedThreadId
-      ? '<b style="color:var(--text);">Delivery:</b> sent as a reply inside "' + escapeHtml(currentMom.linkedThreadSubject || 'linked conversation') + '"<br>'
+      ? '<b style="color:var(--text);">Delivery:</b> replies inside "' + escapeHtml(currentMom.linkedThreadSubject || 'linked conversation') + '"<br>'
       : '<b style="color:var(--text);">Delivery:</b> sent as a new email (no conversation linked)<br>') +
     (willSend
-      ? '<span style="color:var(--success);">✓ This MOM currently qualifies to send — ' + overdueCount + ' point(s) overdue.</span>'
-      : '<span style="color:var(--warn);">⚠ Nothing is overdue right now, so no email would actually go out yet — this preview shows what it WOULD look like once something is.</span>');
+      ? '<span style="color:var(--success);">✓ This MOM currently qualifies for the automatic send — ' + overdueCount + ' point(s) overdue.</span>'
+      : '<span style="color:var(--warn);">⚠ Nothing is overdue yet, so the automatic script wouldn\'t send this on its own — but "Send Now" below will send it immediately regardless.</span>');
 
-  document.getElementById('previewBody').innerHTML = html;
+  updatePreviewBodyLive();
   document.getElementById('reminderPreviewModal').classList.remove('hidden');
 }
+
+function updatePreviewBodyLive(){
+  if(!currentMom) return;
+  const liveConfig = {
+    emailIntro: document.getElementById('preview_intro').value,
+    emailClosing: document.getElementById('preview_closing').value
+  };
+  const { html } = buildDigestHtml(currentMom, liveConfig);
+  document.getElementById('previewBody').innerHTML = html;
+}
+
 function closeReminderPreview(){
   document.getElementById('reminderPreviewModal').classList.add('hidden');
+}
+
+async function saveWordingAsDefault(){
+  const config = await getReminderConfig();
+  config.emailIntro = document.getElementById('preview_intro').value;
+  config.emailClosing = document.getElementById('preview_closing').value;
+  await saveReminderConfig(config);
+  alert('Saved — future automatic emails (for every MOM) will use this wording too.');
+}
+
+// Plain-text fallback body, mirrors the HTML content, required alongside htmlBody in the MIME message
+function buildDigestPlainText(mom, config){
+  const openPoints = (mom.points || []).filter(p => p.status !== 'Closed');
+  const lines = [substitutePlaceholders(config.emailIntro, mom), ''];
+  openPoints.forEach((p, i) => {
+    normalizePoint(p);
+    const targetStr = p.targetHistory[p.targetHistory.length - 1].date;
+    const tag = dayTagFor(p);
+    lines.push((i + 1) + '. [' + p.category + '] ' + p.text);
+    lines.push('   DRI: ' + p.driName + ' <' + p.driEmail + '>   Target: ' + targetStr + ' (' + tag.label + ')   Status: ' + p.status);
+    lines.push('');
+  });
+  lines.push(substitutePlaceholders(config.emailClosing, mom));
+  return lines.join('\n');
+}
+
+// ---------- Manual "Send Now" via Gmail API ----------
+// Separate OAuth consent (gmail.send scope). Requires, in Google Cloud Console:
+// OAuth consent screen -> Data Access -> add scope https://www.googleapis.com/auth/gmail.send
+let gmailSendTokenClient = null;
+function getGmailSendTokenClient(){
+  if(gmailSendTokenClient) return gmailSendTokenClient;
+  if(typeof google === 'undefined' || !google.accounts || !google.accounts.oauth2) return null;
+  gmailSendTokenClient = google.accounts.oauth2.initTokenClient({
+    client_id: GOOGLE_CLIENT_ID,
+    scope: 'https://www.googleapis.com/auth/gmail.send',
+    callback: ''
+  });
+  return gmailSendTokenClient;
+}
+function requestGmailSendToken(){
+  return new Promise((resolve, reject) => {
+    const client = getGmailSendTokenClient();
+    if(!client){ reject(new Error('Google auth library not loaded yet — try again in a moment.')); return; }
+    client.callback = (resp) => {
+      if(resp.error){ reject(new Error(resp.error)); } else { resolve(resp.access_token); }
+    };
+    client.requestAccessToken({prompt:''});
+  });
+}
+
+function base64UrlEncode(str){
+  const bytes = new TextEncoder().encode(str);
+  let binary = '';
+  bytes.forEach(b => binary += String.fromCharCode(b));
+  return btoa(binary).replace(/\+/g,'-').replace(/\//g,'_').replace(/=+$/,'');
+}
+
+function buildMimeMessage({to, cc, subject, htmlBody, plainBody, inReplyTo, references}){
+  const boundary = 'momtrk_' + Math.random().toString(36).slice(2);
+  const headers = [
+    'To: ' + to,
+    cc ? 'Cc: ' + cc : null,
+    'Subject: =?UTF-8?B?' + btoa(unescape(encodeURIComponent(subject))) + '?=',
+    'MIME-Version: 1.0',
+    inReplyTo ? 'In-Reply-To: ' + inReplyTo : null,
+    references ? 'References: ' + references : null,
+    'Content-Type: multipart/alternative; boundary="' + boundary + '"'
+  ].filter(Boolean);
+
+  const body =
+    '--' + boundary + '\r\n' +
+    'Content-Type: text/plain; charset="UTF-8"\r\n\r\n' + plainBody + '\r\n\r\n' +
+    '--' + boundary + '\r\n' +
+    'Content-Type: text/html; charset="UTF-8"\r\n\r\n' + htmlBody + '\r\n\r\n' +
+    '--' + boundary + '--';
+
+  return headers.join('\r\n') + '\r\n\r\n' + body;
+}
+
+async function sendReminderNow(){
+  if(!currentMom || !currentMom.ref){ alert('Save at least one discussion point first.'); return; }
+  const btn = document.getElementById('previewSendBtn');
+  const origLabel = btn.textContent;
+  btn.disabled = true; btn.textContent = 'Sending…';
+  try{
+    const token = await requestGmailSendToken();
+    const liveConfig = {
+      emailIntro: document.getElementById('preview_intro').value,
+      emailClosing: document.getElementById('preview_closing').value
+    };
+    const { html, driEmails } = buildDigestHtml(currentMom, liveConfig);
+    const plain = buildDigestPlainText(currentMom, liveConfig);
+    if(driEmails.length === 0){ throw new Error('No DRI emails found on open points.'); }
+
+    let subject = document.getElementById('preview_subject').value.trim();
+    const ccInput = document.getElementById('preview_cc').value.trim();
+    let inReplyTo = '', references = '', threadId = null;
+
+    if(currentMom.linkedThreadId){
+      try{
+        const metaRes = await fetch('https://gmail.googleapis.com/gmail/v1/users/me/threads/' + currentMom.linkedThreadId + '?format=metadata&metadataHeaders=Message-ID&metadataHeaders=Subject', {
+          headers: {'Authorization': 'Bearer ' + token}
+        });
+        const metaData = await metaRes.json();
+        if(metaRes.ok && metaData.messages && metaData.messages.length){
+          const lastMsg = metaData.messages[metaData.messages.length - 1];
+          const headers = (lastMsg.payload && lastMsg.payload.headers) || [];
+          const msgId = (headers.find(h => h.name === 'Message-ID') || {}).value;
+          const origSubject = (headers.find(h => h.name === 'Subject') || {}).value;
+          if(msgId){ inReplyTo = msgId; references = msgId; }
+          if(origSubject){ subject = /^re:/i.test(origSubject) ? origSubject : 'Re: ' + origSubject; }
+          threadId = currentMom.linkedThreadId;
+        }
+      }catch(e){ /* thread lookup failed — falls back to a plain new email below */ }
+    }
+
+    const mime = buildMimeMessage({
+      to: driEmails.join(','), cc: ccInput, subject, htmlBody: html, plainBody: plain, inReplyTo, references
+    });
+    const payload = { raw: base64UrlEncode(mime) };
+    if(threadId) payload.threadId = threadId;
+
+    const sendRes = await fetch('https://gmail.googleapis.com/gmail/v1/users/me/messages/send', {
+      method: 'POST',
+      headers: {'Authorization': 'Bearer ' + token, 'Content-Type': 'application/json'},
+      body: JSON.stringify(payload)
+    });
+    const sendData = await sendRes.json();
+    if(!sendRes.ok) throw new Error((sendData.error && sendData.error.message) || 'Send failed');
+
+    currentMom.lastDigestSentOn = todayStr();
+    if(threadId) currentMom.linkedThreadId = threadId;
+    await persistMom();
+
+    btn.disabled = false; btn.textContent = origLabel;
+    alert('Sent.\nTo: ' + driEmails.join(', ') + (ccInput ? '\nCC: ' + ccInput : ''));
+    closeReminderPreview();
+  }catch(e){
+    btn.disabled = false; btn.textContent = origLabel;
+    alert('Could not send: ' + e.message);
+  }
 }
 
 async function openReminderSettings(){
