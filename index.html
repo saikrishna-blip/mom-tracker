@@ -183,13 +183,13 @@
 
   <div id="dashboardView">
     <div class="note-banner">
-      Reminder emails are generated pre-filled and opened in your mail client — nothing is sent silently in the background.
-      Excel export gives you a real .xlsx to upload to Drive. Check the badge next to your name above:
-      "☁ Shared (cloud)" means everyone sees the same live data; "💻 This browser only" means data is local to this device until cloud storage is configured.
+      Automatic reminder emails run on a schedule outside this app (via Apps Script) — check "Reminder Settings" below to see the schedule, edit the email wording, and confirm when it last ran.
+      Check the badge next to your name above: "☁ Shared (cloud)" means everyone sees the same live data; "💻 This browser only" means data is local to this device until cloud storage is configured.
     </div>
     <div class="toolbar">
       <button class="btn primary" onclick="showCreateForm()">+ New MOM</button>
       <button class="btn" onclick="loadDashboard()">Refresh</button>
+      <button class="btn" onclick="openReminderSettings()">⚙ Reminder Settings</button>
     </div>
     <div id="dashSummary" style="margin-bottom:14px;"></div>
     <div class="panel">
@@ -204,6 +204,44 @@
     </div>
   </div>
 
+  <div id="reminderSettingsModal" class="hidden" style="position:fixed;inset:0;background:rgba(0,0,0,.65);z-index:1000;display:flex;align-items:center;justify-content:center;padding:20px;">
+    <div style="background:var(--panel);border:1px solid var(--border);border-radius:10px;padding:24px;width:600px;max-width:100%;max-height:86vh;overflow-y:auto;">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px;">
+        <h2 style="margin:0;">Reminder Settings</h2>
+        <button class="btn small ghost" onclick="closeReminderSettings()">Close</button>
+      </div>
+      <p style="color:var(--muted);font-size:12.5px;margin:6px 0 18px;">
+        These change what the automatic emails say — edited here, used automatically by the script next time it runs. No code changes needed for wording changes.
+      </p>
+
+      <div id="reminderStatusBox" style="background:var(--panel2);border:1px solid var(--border);border-radius:8px;padding:12px 14px;margin-bottom:18px;font-size:12.5px;color:var(--muted);">
+        Loading status…
+      </div>
+
+      <label>Schedule label (informational — set this to match what you configured in Apps Script)</label>
+      <input id="rs_scheduleLabel" placeholder="e.g. 9:00 AM IST, daily" class="row-gap">
+
+      <label>How often to repeat a reminder for the same MOM while it's still overdue</label>
+      <select id="rs_repeatDays" class="row-gap">
+        <option value="1">Every day</option>
+        <option value="2">Every 2 days</option>
+        <option value="3">Every 3 days</option>
+        <option value="7">Weekly</option>
+      </select>
+
+      <label>Email opening paragraph — you can use {meetingName}, {ref}, {createdByName}</label>
+      <textarea id="rs_intro" style="min-height:80px;" class="row-gap"></textarea>
+
+      <label>Email closing paragraph</label>
+      <textarea id="rs_closing" style="min-height:60px;" class="row-gap"></textarea>
+
+      <button class="btn primary" onclick="saveReminderSettingsForm()">Save settings</button>
+      <div style="margin-top:14px;font-size:11.5px;color:var(--muted);line-height:1.5;border-top:1px solid var(--border);padding-top:12px;">
+        Note: the actual time-of-day the check runs (e.g. 9am) and which Google Contacts group gets CC'd are set inside the Apps Script itself (<code>atHour(...)</code> and <code>EMAIL_LOOP_GROUP_NAME</code>) — those need a script edit + re-running <code>setupDailyTrigger</code> to change, they can't be edited from here.
+      </div>
+    </div>
+  </div>
+
   <div id="editorView" class="hidden">
     <div class="toolbar">
       <button class="btn ghost" onclick="backToDashboard()">← Back to list</button>
@@ -213,7 +251,19 @@
         into folder: <b id="driveFolderLabel" style="color:var(--text);">MOM Tracker Records</b>
         <button class="btn small ghost" onclick="changeDriveFolder()">Change</button>
       </span>
+      <button class="btn" onclick="previewReminderEmail()">Preview reminder email</button>
       <button class="btn danger" style="margin-left:auto;" onclick="deleteMomFromEditor()">Delete this MOM</button>
+    </div>
+
+    <div id="reminderPreviewModal" class="hidden" style="position:fixed;inset:0;background:rgba(0,0,0,.65);z-index:1000;display:flex;align-items:center;justify-content:center;padding:20px;">
+      <div style="background:var(--panel);border:1px solid var(--border);border-radius:10px;padding:20px;width:720px;max-width:100%;max-height:88vh;overflow-y:auto;">
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px;">
+          <h2 style="margin:0;">Reminder email preview</h2>
+          <button class="btn small ghost" onclick="closeReminderPreview()">Close</button>
+        </div>
+        <div id="previewMeta" style="font-size:12.5px;color:var(--muted);margin:8px 0 14px;line-height:1.6;"></div>
+        <div id="previewBody" style="background:#ffffff;border-radius:8px;padding:16px;color:#1a1a1a;"></div>
+      </div>
     </div>
 
     <div class="panel header-fields">
@@ -1075,6 +1125,141 @@ const DAY_COLORS = {
   over:{bg:'FBDADA', fg:'B3261E'}, soon:{bg:'FFF1D6', fg:'A9660A'},
   ok:{bg:'DFF5E8', fg:'1C8A55'}, paused:{bg:'EDE5FF', fg:'6A4FCB'}
 };
+
+// ---------- Reminder config (shared, editable from the app, read by the Apps Script) ----------
+const REMINDER_CONFIG_DEFAULTS = {
+  emailIntro: 'This is an automated status check for meeting "{meetingName}" ({ref}). The following points are still open. Please reply to this email with the current status and, if needed, a revised target date for each item below.',
+  emailClosing: 'Sent automatically by MOM Tracker on behalf of {createdByName}.',
+  repeatEveryDays: 1,
+  scheduleLabel: '9:00 AM IST, daily',
+  lastRunAt: null
+};
+
+async function getReminderConfig(){
+  try{
+    const r = await storage.get('config:reminders', true);
+    return Object.assign({}, REMINDER_CONFIG_DEFAULTS, JSON.parse(r.value));
+  }catch(e){
+    return Object.assign({}, REMINDER_CONFIG_DEFAULTS);
+  }
+}
+async function saveReminderConfig(config){
+  await storage.set('config:reminders', JSON.stringify(config), true);
+}
+
+function substitutePlaceholders(text, mom){
+  return (text || '')
+    .replace(/\{meetingName\}/g, mom.meetingName || '')
+    .replace(/\{ref\}/g, mom.ref || '')
+    .replace(/\{createdByName\}/g, mom.createdByName || 'the meeting owner');
+}
+
+// Builds the exact HTML the automatic email would contain, from live MOM data + saved settings.
+// Used both for the in-app preview and mirrored by the Apps Script for the real send.
+function buildDigestHtml(mom, config){
+  const openPoints = (mom.points || []).filter(p => p.status !== 'Closed');
+  const enriched = openPoints.map(p => {
+    normalizePoint(p);
+    const targetStr = p.targetHistory[p.targetHistory.length - 1].date;
+    return { p, targetStr, tag: dayTagFor(p) };
+  });
+  const intro = escapeHtml(substitutePlaceholders(config.emailIntro, mom)).replace(/\n/g, '<br>');
+  const closing = escapeHtml(substitutePlaceholders(config.emailClosing, mom)).replace(/\n/g, '<br>');
+
+  const rows = enriched.map((x, i) => {
+    const isOverdue = x.tag.cls === 'over';
+    const bg = isOverdue ? '#FBDADA' : (i % 2 ? '#F6F8FA' : '#FFFFFF');
+    const statusColor = STATUS_COLORS[x.p.status] || STATUS_COLORS.Open;
+    const dayColor = DAY_COLORS[x.tag.cls] || DAY_COLORS.ok;
+    return `<tr style="background:${bg};">
+      <td style="padding:8px;border:1px solid #ddd;">${i + 1}</td>
+      <td style="padding:8px;border:1px solid #ddd;">${escapeHtml(x.p.category)}</td>
+      <td style="padding:8px;border:1px solid #ddd;">${escapeHtml(x.p.text)}</td>
+      <td style="padding:8px;border:1px solid #ddd;">${escapeHtml(x.p.driName)}<br><span style="color:#666;font-size:12px;">${escapeHtml(x.p.driEmail)}</span></td>
+      <td style="padding:8px;border:1px solid #ddd;">${fmtDate(x.targetStr)}</td>
+      <td style="padding:8px;border:1px solid #ddd;"><span style="padding:2px 8px;border-radius:10px;background:#${statusColor.bg};color:#${statusColor.fg};font-weight:bold;font-size:12px;">${x.p.status}</span></td>
+      <td style="padding:8px;border:1px solid #ddd;"><span style="color:#${dayColor.fg};font-weight:bold;">${x.tag.label}</span></td>
+    </tr>`;
+  }).join('');
+
+  const html = `<div style="font-family:Arial,sans-serif;font-size:14px;color:#1a1a1a;line-height:1.5;">
+    <p>${intro}</p>
+    <table style="border-collapse:collapse;width:100%;margin:16px 0;font-size:13px;">
+      <thead><tr style="background:#2C3E50;color:#fff;">
+        <th style="padding:8px;border:1px solid #ddd;text-align:left;">#</th>
+        <th style="padding:8px;border:1px solid #ddd;text-align:left;">Category</th>
+        <th style="padding:8px;border:1px solid #ddd;text-align:left;">Discussion Point</th>
+        <th style="padding:8px;border:1px solid #ddd;text-align:left;">DRI</th>
+        <th style="padding:8px;border:1px solid #ddd;text-align:left;">Target Date</th>
+        <th style="padding:8px;border:1px solid #ddd;text-align:left;">Status</th>
+        <th style="padding:8px;border:1px solid #ddd;text-align:left;">Days</th>
+      </tr></thead>
+      <tbody>${rows || '<tr><td colspan="7" style="padding:12px;text-align:center;color:#888;">No open points</td></tr>'}</tbody>
+    </table>
+    <p>${closing}</p>
+  </div>`;
+
+  const overdueCount = enriched.filter(x => x.p.status !== 'Paused' && x.tag.cls === 'over').length;
+  const driEmails = [...new Set(openPoints.map(p => p.driEmail).filter(Boolean))];
+  return { html, overdueCount, driEmails, enriched };
+}
+
+async function previewReminderEmail(){
+  if(!currentMom || !currentMom.ref){ alert('Save at least one discussion point first.'); return; }
+  const config = await getReminderConfig();
+  const { html, overdueCount, driEmails } = buildDigestHtml(currentMom, config);
+  const subject = 'MOM Update Needed: ' + currentMom.ref + ' — ' + overdueCount + ' point(s) overdue';
+
+  const metaEl = document.getElementById('previewMeta');
+  const willSend = overdueCount > 0;
+  metaEl.innerHTML =
+    '<b style="color:var(--text);">Subject:</b> ' + escapeHtml(subject) + '<br>' +
+    '<b style="color:var(--text);">To:</b> ' + (driEmails.length ? escapeHtml(driEmails.join(', ')) : '(no DRI emails on open points)') + '<br>' +
+    '<b style="color:var(--text);">CC:</b> resolved automatically at send time from your configured Google Contacts group<br>' +
+    (currentMom.linkedThreadId
+      ? '<b style="color:var(--text);">Delivery:</b> sent as a reply inside "' + escapeHtml(currentMom.linkedThreadSubject || 'linked conversation') + '"<br>'
+      : '<b style="color:var(--text);">Delivery:</b> sent as a new email (no conversation linked)<br>') +
+    (willSend
+      ? '<span style="color:var(--success);">✓ This MOM currently qualifies to send — ' + overdueCount + ' point(s) overdue.</span>'
+      : '<span style="color:var(--warn);">⚠ Nothing is overdue right now, so no email would actually go out yet — this preview shows what it WOULD look like once something is.</span>');
+
+  document.getElementById('previewBody').innerHTML = html;
+  document.getElementById('reminderPreviewModal').classList.remove('hidden');
+}
+function closeReminderPreview(){
+  document.getElementById('reminderPreviewModal').classList.add('hidden');
+}
+
+async function openReminderSettings(){
+  const config = await getReminderConfig();
+  document.getElementById('rs_scheduleLabel').value = config.scheduleLabel;
+  document.getElementById('rs_repeatDays').value = String(config.repeatEveryDays);
+  document.getElementById('rs_intro').value = config.emailIntro;
+  document.getElementById('rs_closing').value = config.emailClosing;
+
+  const statusEl = document.getElementById('reminderStatusBox');
+  if(config.lastRunAt){
+    const last = new Date(config.lastRunAt);
+    statusEl.innerHTML = '✓ Automation last confirmed running: <b style="color:var(--text);">' + last.toLocaleString('en-GB') + '</b><br>Configured schedule: <b style="color:var(--text);">' + escapeHtml(config.scheduleLabel) + '</b>';
+  } else {
+    statusEl.innerHTML = 'No confirmed automatic run yet. Once your Apps Script trigger fires (or you run <code>testRunNow</code>), this will show the last confirmed check-in time.<br>Configured schedule: <b style="color:var(--text);">' + escapeHtml(config.scheduleLabel) + '</b>';
+  }
+
+  document.getElementById('reminderSettingsModal').classList.remove('hidden');
+}
+function closeReminderSettings(){
+  document.getElementById('reminderSettingsModal').classList.add('hidden');
+}
+async function saveReminderSettingsForm(){
+  const config = await getReminderConfig();
+  config.scheduleLabel = document.getElementById('rs_scheduleLabel').value.trim() || REMINDER_CONFIG_DEFAULTS.scheduleLabel;
+  config.repeatEveryDays = parseInt(document.getElementById('rs_repeatDays').value, 10) || 1;
+  config.emailIntro = document.getElementById('rs_intro').value;
+  config.emailClosing = document.getElementById('rs_closing').value;
+  await saveReminderConfig(config);
+  alert('Saved. The next automatic run will use this wording — no script changes needed.');
+  closeReminderSettings();
+}
 function cellAddr(r,c){ return XLSX.utils.encode_cell({r,c}); }
 function setCell(ws, r, c, value, style){
   const addr = cellAddr(r,c);
