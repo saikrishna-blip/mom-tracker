@@ -508,20 +508,37 @@ function makeFirestoreStorage(db){
   };
 }
 
-const storageReady = (async function initStorageBackend(){
+const storageReady = (async function initFirebaseApp(){
   const configured = FIREBASE_CONFIG.apiKey && FIREBASE_CONFIG.apiKey.indexOf('PASTE_YOUR') !== 0;
   if(!configured || typeof firebase === 'undefined'){
     return;
   }
   try{
     firebase.initializeApp(FIREBASE_CONFIG);
-    await firebase.auth().signInAnonymously();
+    // NOTE: Firestore access is intentionally NOT granted here. It used to sign in
+    // anonymously at this point, which meant ANY visitor got shared-cloud read/write
+    // access whether or not they actually signed in. Real access is now only granted
+    // in handleGoogleCredential(), tied to a verified Google identity, and enforced by
+    // matching Firestore security rules — see upgradeToFirestoreForUser_() below.
+  }catch(e){
+    console.warn('Firebase app init failed, using local fallback storage:', e);
+  }
+})();
+
+async function upgradeToFirestoreForUser_(idToken){
+  if(typeof firebase === 'undefined' || !firebase.apps || !firebase.apps.length) return;
+  try{
+    const credential = firebase.auth.GoogleAuthProvider.credential(idToken);
+    await firebase.auth().signInWithCredential(credential);
     storage = makeFirestoreStorage(firebase.firestore());
     usingFirestore = true;
   }catch(e){
-    console.warn('Firestore unavailable, using local fallback storage:', e);
+    // Most likely cause: this account's email isn't allowed by your Firestore security
+    // rules (e.g. wrong domain). App still works, just on local-browser storage only.
+    console.warn('Could not get shared cloud access for this account:', e);
+    usingFirestore = false;
   }
-})();
+}
 
 function updateStorageBadge(){
   const el = document.getElementById('storageModeBadge');
@@ -564,9 +581,11 @@ function decodeJwt(token){
   return JSON.parse(json);
 }
 
-function handleGoogleCredential(response){
+async function handleGoogleCredential(response){
   const payload = decodeJwt(response.credential);
   currentUser = {name: payload.name, email: payload.email, picture: payload.picture};
+  await storageReady; // ensure Firebase app is initialized first
+  await upgradeToFirestoreForUser_(response.credential);
   enterApp();
 }
 
@@ -592,6 +611,11 @@ function logout(){
   if(window.google && google.accounts && google.accounts.id){
     try{ google.accounts.id.disableAutoSelect(); }catch(e){}
   }
+  if(typeof firebase !== 'undefined' && firebase.apps && firebase.apps.length){
+    try{ firebase.auth().signOut(); }catch(e){}
+  }
+  storage = fallbackStorage;
+  usingFirestore = false;
   document.getElementById('mainApp').classList.add('hidden');
   document.getElementById('loginScreen').classList.remove('hidden');
 }
