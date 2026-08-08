@@ -728,7 +728,7 @@ function renderMomList(){
     div.onclick = ()=>openMom(m.ref);
     div.innerHTML = `
       <div>
-        <div class="mom-ref">${m.ref}</div>
+        <div class="mom-ref">${escapeHtml(m.ref)}</div>
         <div style="font-weight:600;margin-top:2px;">${escapeHtml(m.meetingName||'(untitled meeting)')}</div>
         <div class="mom-meta">${m.dateTime ? new Date(m.dateTime).toLocaleString('en-GB') : '—'}</div>
       </div>
@@ -736,9 +736,11 @@ function renderMomList(){
         <span class="stat-pill">${total} points</span>
         <span class="stat-pill" style="color:var(--accent);">${open} open</span>
         ${overdue>0 ? `<span class="stat-pill" style="color:var(--danger);border-color:var(--danger);">${overdue} overdue</span>` : ''}
-        <button class="btn small ghost" onclick="event.stopPropagation(); duplicateMom('${m.ref}')" title="Start a new MOM copied from this one">Duplicate</button>
-        <button class="btn small danger" onclick="event.stopPropagation(); deleteMom('${m.ref}')">Delete</button>
+        <button class="btn small ghost" data-action="duplicate" title="Start a new MOM copied from this one">Duplicate</button>
+        <button class="btn small danger" data-action="delete">Delete</button>
       </div>`;
+    div.querySelector('[data-action="duplicate"]').onclick = (ev)=>{ ev.stopPropagation(); duplicateMom(m.ref); };
+    div.querySelector('[data-action="delete"]').onclick = (ev)=>{ ev.stopPropagation(); deleteMom(m.ref); };
     listEl.appendChild(div);
   });
 }
