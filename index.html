@@ -486,7 +486,7 @@ const fallbackStorage = (typeof window.storage !== 'undefined' && window.storage
     if(v===null){ const e = new Error('not found'); throw e; }
     return {key, value:v};
   },
-  async set(key, value){
+  async set(key, value, extraFields){
     localStorage.setItem(this._p+key, value);
     return {key, value};
   },
@@ -519,8 +519,9 @@ function makeFirestoreStorage(db){
       if(!doc.exists) throw new Error('not found');
       return {key, value: doc.data().value};
     },
-    async set(key, value){
-      await col.doc(key).set({value, updatedAt: firebase.firestore.FieldValue.serverTimestamp()});
+    async set(key, value, extraFields){
+      const doc = Object.assign({value, updatedAt: firebase.firestore.FieldValue.serverTimestamp()}, extraFields || {});
+      await col.doc(key).set(doc);
       return {key, value};
     },
     async delete(key){
@@ -697,7 +698,10 @@ async function loadDashboard(){
       }catch(e){}
     }
     moms.sort((a,b)=> (b.createdAt||'').localeCompare(a.createdAt||''));
-    allMoms = moms;
+    // Only show MOMs created by the current signed-in user. This mirrors the Firestore
+    // rule (which enforces this at the database level) so the UI never even displays
+    // something the rule would block anyway.
+    allMoms = moms.filter(m => m.createdBy === currentUser.email);
     renderDashSummary();
     renderMomList();
   }catch(e){
@@ -775,7 +779,11 @@ function renderMomList(){
 
 async function deleteMom(ref){
   const m = allMoms.find(x=>x.ref===ref);
-  const label = m ? `"${m.meetingName || ref}" (${ref})` : ref;
+  if(!m || m.createdBy !== currentUser.email){
+    alert('You can only delete MOMs you created.');
+    return;
+  }
+  const label = `"${m.meetingName || ref}" (${ref})`;
   if(!confirm(`Delete ${label}? This removes it and its full discussion log permanently — this can't be undone.`)) return;
   await storage.delete('mom:'+ref, true);
   loadDashboard();
@@ -813,7 +821,12 @@ function showCreateForm(){
 async function openMom(ref){
   try{
     const r = await storage.get('mom:'+ref, true);
-    currentMom = JSON.parse(r.value);
+    const mom = JSON.parse(r.value);
+    if(mom.createdBy !== currentUser.email){
+      alert('This MOM belongs to a different account and can\'t be opened here.');
+      return;
+    }
+    currentMom = mom;
     renderEditor();
     document.getElementById('dashboardView').classList.add('hidden');
     document.getElementById('editorView').classList.remove('hidden');
@@ -875,7 +888,7 @@ async function persistMom(){
     currentMom.ref = await genRef();
     document.getElementById('refStamp').textContent = currentMom.ref;
   }
-  await storage.set('mom:'+currentMom.ref, JSON.stringify(currentMom), true);
+  await storage.set('mom:'+currentMom.ref, JSON.stringify(currentMom), {createdBy: currentMom.createdBy});
 }
 
 async function toggleAddPoint(){
