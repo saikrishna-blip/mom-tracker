@@ -309,9 +309,9 @@
         <div id="previewBody" style="background:#ffffff;border-radius:8px;padding:16px;color:#1a1a1a;margin-top:6px;"></div>
 
         <div style="margin-top:16px;display:flex;gap:8px;flex-wrap:wrap;">
-          <button class="btn primary" id="previewSendBtn" onclick="sendReminderNow()">Send Now</button>
+          <button class="btn primary" id="previewCopyBtn" onclick="copyReminderEmailToClipboard()">Copy email</button>
           <button class="btn" onclick="saveWordingAsDefault()">Save wording as default</button>
-          <button class="btn ghost" onclick="closeReminderPreview()">Close without sending</button>
+          <button class="btn ghost" onclick="closeReminderPreview()">Close</button>
         </div>
       </div>
     </div>
@@ -1346,7 +1346,7 @@ async function previewReminderEmail(){
       : '<b style="color:var(--text);">Delivery:</b> sent as a new email (no conversation linked — link one via "Pick from inbox" in the meeting details to enable auto-recipients)<br>') +
     (willSend
       ? '<span style="color:var(--success);">✓ This MOM currently qualifies for the automatic send — ' + overdueCount + ' point(s) overdue.</span>'
-      : '<span style="color:var(--warn);">⚠ Nothing is overdue yet, so the automatic script wouldn\'t send this on its own — but "Send Now" below will send it immediately regardless.</span>');
+      : '<span style="color:var(--warn);">⚠ Nothing is overdue yet, so the automatic script wouldn\'t send this on its own — this is just a preview of what it would contain.</span>');
 
   const ccDisplay = document.getElementById('preview_cc_display');
   currentPreviewLoopEmails = [];
@@ -1407,117 +1407,39 @@ function buildDigestPlainText(mom, config){
   return lines.join('\n');
 }
 
-// ---------- Manual "Send Now" via Gmail API ----------
-// Separate OAuth consent (gmail.send scope). Requires, in Google Cloud Console:
-// OAuth consent screen -> Data Access -> add scope https://www.googleapis.com/auth/gmail.send
-let gmailSendTokenClient = null;
-function getGmailSendTokenClient(){
-  if(gmailSendTokenClient) return gmailSendTokenClient;
-  if(typeof google === 'undefined' || !google.accounts || !google.accounts.oauth2) return null;
-  gmailSendTokenClient = google.accounts.oauth2.initTokenClient({
-    client_id: GOOGLE_CLIENT_ID,
-    scope: 'https://www.googleapis.com/auth/gmail.send',
-    callback: ''
-  });
-  return gmailSendTokenClient;
-}
-function requestGmailSendToken(){
-  return new Promise((resolve, reject) => {
-    const client = getGmailSendTokenClient();
-    if(!client){ reject(new Error('Google auth library not loaded yet — try again in a moment.')); return; }
-    client.callback = (resp) => {
-      if(resp.error){ reject(new Error(resp.error)); } else { resolve(resp.access_token); }
-    };
-    client.requestAccessToken({prompt:''});
-  });
-}
-
-function base64UrlEncode(str){
-  const bytes = new TextEncoder().encode(str);
-  let binary = '';
-  bytes.forEach(b => binary += String.fromCharCode(b));
-  return btoa(binary).replace(/\+/g,'-').replace(/\//g,'_').replace(/=+$/,'');
-}
-
-function buildMimeMessage({to, cc, subject, htmlBody, plainBody, inReplyTo, references}){
-  const boundary = 'momtrk_' + Math.random().toString(36).slice(2);
-  const headers = [
-    'To: ' + to,
-    cc ? 'Cc: ' + cc : null,
-    'Subject: =?UTF-8?B?' + btoa(unescape(encodeURIComponent(subject))) + '?=',
-    'MIME-Version: 1.0',
-    inReplyTo ? 'In-Reply-To: ' + inReplyTo : null,
-    references ? 'References: ' + references : null,
-    'Content-Type: multipart/alternative; boundary="' + boundary + '"'
-  ].filter(Boolean);
-
-  const body =
-    '--' + boundary + '\r\n' +
-    'Content-Type: text/plain; charset="UTF-8"\r\n\r\n' + plainBody + '\r\n\r\n' +
-    '--' + boundary + '\r\n' +
-    'Content-Type: text/html; charset="UTF-8"\r\n\r\n' + htmlBody + '\r\n\r\n' +
-    '--' + boundary + '--';
-
-  return headers.join('\r\n') + '\r\n\r\n' + body;
-}
-
-async function sendReminderNow(){
+// ---------- Copy email to clipboard (view + copy only — no sending from this app) ----------
+async function copyReminderEmailToClipboard(){
   if(!currentMom || !currentMom.ref){ alert('Save at least one discussion point first.'); return; }
-  const btn = document.getElementById('previewSendBtn');
+  const btn = document.getElementById('previewCopyBtn');
   const origLabel = btn.textContent;
-  btn.disabled = true; btn.textContent = 'Sending…';
+
+  const liveConfig = {
+    emailIntro: document.getElementById('preview_intro').value,
+    emailClosing: document.getElementById('preview_closing').value
+  };
+  const { html } = buildDigestHtml(currentMom, liveConfig);
+  const plain = buildDigestPlainText(currentMom, liveConfig);
+
   try{
-    const token = await requestGmailSendToken();
-    const liveConfig = {
-      emailIntro: document.getElementById('preview_intro').value,
-      emailClosing: document.getElementById('preview_closing').value
-    };
-    const { html, driEmails } = buildDigestHtml(currentMom, liveConfig);
-    const plain = buildDigestPlainText(currentMom, liveConfig);
-    if(driEmails.length === 0){ throw new Error('No DRI emails found on open points.'); }
-
-    let subject = document.getElementById('preview_subject').value.trim();
-    let inReplyTo = '', references = '', threadId = null;
-    let toList = driEmails;
-
-    if(currentMom.linkedThreadId){
-      try{
-        const { participants, msgId, subject: origSubject } = await resolveThreadRecipients(currentMom.linkedThreadId);
-        if(msgId){ inReplyTo = msgId; references = msgId; }
-        if(origSubject){ subject = /^re:/i.test(origSubject) ? origSubject : 'Re: ' + origSubject; }
-        threadId = currentMom.linkedThreadId;
-        // Reply-all behavior: send to everyone already on this conversation, not just the DRI.
-        if(participants.length){
-          toList = [...new Set([...participants, ...driEmails])];
-        }
-      }catch(e){ /* thread lookup failed — falls back to DRI-only send below */ }
+    if(navigator.clipboard && window.ClipboardItem){
+      const htmlBlob = new Blob([html], {type:'text/html'});
+      const textBlob = new Blob([plain], {type:'text/plain'});
+      await navigator.clipboard.write([new ClipboardItem({'text/html': htmlBlob, 'text/plain': textBlob})]);
+      btn.textContent = 'Copied ✓';
+    } else {
+      await navigator.clipboard.writeText(plain);
+      btn.textContent = 'Copied as text ✓';
     }
-
-    const mime = buildMimeMessage({
-      to: toList.join(','), cc: '', subject, htmlBody: html, plainBody: plain, inReplyTo, references
-    });
-    const payload = { raw: base64UrlEncode(mime) };
-    if(threadId) payload.threadId = threadId;
-
-    const sendRes = await fetch('https://gmail.googleapis.com/gmail/v1/users/me/messages/send', {
-      method: 'POST',
-      headers: {'Authorization': 'Bearer ' + token, 'Content-Type': 'application/json'},
-      body: JSON.stringify(payload)
-    });
-    const sendData = await sendRes.json();
-    if(!sendRes.ok) throw new Error((sendData.error && sendData.error.message) || 'Send failed');
-
-    currentMom.lastDigestSentOn = todayStr();
-    if(threadId) currentMom.linkedThreadId = threadId;
-    await persistMom();
-
-    btn.disabled = false; btn.textContent = origLabel;
-    alert('Sent.\nTo: ' + toList.join(', '));
-    closeReminderPreview();
   }catch(e){
-    btn.disabled = false; btn.textContent = origLabel;
-    alert('Could not send: ' + e.message);
+    try{
+      await navigator.clipboard.writeText(plain);
+      btn.textContent = 'Copied as text ✓';
+    }catch(e2){
+      alert('Could not copy automatically — select the preview above and copy it manually (Ctrl+C).');
+      return;
+    }
   }
+  setTimeout(() => { btn.textContent = origLabel; }, 2000);
 }
 
 async function openReminderSettings(){
