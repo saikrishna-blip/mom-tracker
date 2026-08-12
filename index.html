@@ -1,8 +1,4 @@
-// ============================================================
-// MOM Tracker — Automatic Reminder Emails (consolidated per MOM)
-// Runs on a daily timer (no manual clicking, no app needs to be open).
-// Reads MOM data AND email wording/settings straight from Firestore — the wording,
-// repeat frequency, and schedule label are editable from the web app's "Reminder<!DOCTYPE html>
+<!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="UTF-8">
@@ -1377,9 +1373,11 @@ async function previewReminderEmail(){
   const metaEl = document.getElementById('previewMeta');
   const willSend = overdueCount > 0;
   metaEl.innerHTML =
-    '<b style="color:var(--text);">To:</b> ' + (driEmails.length ? escapeHtml(driEmails.join(', ')) : '(no DRI emails on open points)') + '<br>' +
     (currentMom.linkedThreadId
-      ? '<b style="color:var(--text);">Delivery:</b> replies inside "' + escapeHtml(currentMom.linkedThreadSubject || 'linked conversation') + '"<br>'
+      ? '<b style="color:var(--text);">To:</b> everyone already on the linked conversation "' + escapeHtml(currentMom.linkedThreadSubject || 'linked conversation') + '" (fetched automatically when sent)<br>'
+      : '<b style="color:var(--text);">To:</b> ' + (driEmails.length ? escapeHtml(driEmails.join(', ')) : '(no DRI emails on open points)') + '<br>') +
+    (currentMom.linkedThreadId
+      ? '<b style="color:var(--text);">Delivery:</b> replies inside that conversation<br>'
       : '<b style="color:var(--text);">Delivery:</b> sent as a new email (no conversation linked)<br>') +
     (willSend
       ? '<span style="color:var(--success);">✓ This MOM currently qualifies for the automatic send — ' + overdueCount + ' point(s) overdue.</span>'
@@ -1509,12 +1507,13 @@ async function sendReminderNow(){
     if(driEmails.length === 0){ throw new Error('No DRI emails found on open points.'); }
 
     let subject = document.getElementById('preview_subject').value.trim();
-    const ccInput = currentPreviewLoopEmails.join(',');
     let inReplyTo = '', references = '', threadId = null;
+    let toList = driEmails;
+    let ccList = [...currentPreviewLoopEmails];
 
     if(currentMom.linkedThreadId){
       try{
-        const metaRes = await fetch('https://gmail.googleapis.com/gmail/v1/users/me/threads/' + currentMom.linkedThreadId + '?format=metadata&metadataHeaders=Message-ID&metadataHeaders=Subject', {
+        const metaRes = await fetch('https://gmail.googleapis.com/gmail/v1/users/me/threads/' + currentMom.linkedThreadId + '?format=metadata&metadataHeaders=Message-ID&metadataHeaders=Subject&metadataHeaders=From&metadataHeaders=To&metadataHeaders=Cc', {
           headers: {'Authorization': 'Bearer ' + token}
         });
         const metaData = await metaRes.json();
@@ -1526,12 +1525,27 @@ async function sendReminderNow(){
           if(msgId){ inReplyTo = msgId; references = msgId; }
           if(origSubject){ subject = /^re:/i.test(origSubject) ? origSubject : 'Re: ' + origSubject; }
           threadId = currentMom.linkedThreadId;
+
+          // Reply-all behavior: pull in everyone already on this conversation (From + To + Cc
+          // of the last message), not just the DRI — this is the fix for "only sends to one person".
+          const extractEmails = (headerVal) => headerVal ? [...headerVal.matchAll(/[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/g)].map(m => m[0]) : [];
+          const fromVal = (headers.find(h => h.name === 'From') || {}).value;
+          const toVal = (headers.find(h => h.name === 'To') || {}).value;
+          const ccVal = (headers.find(h => h.name === 'Cc') || {}).value;
+          const threadParticipants = [...new Set([...extractEmails(fromVal), ...extractEmails(toVal), ...extractEmails(ccVal)])]
+            .filter(e => e.toLowerCase() !== currentUser.email.toLowerCase());
+
+          if(threadParticipants.length){
+            toList = threadParticipants;
+            // Keep the DRI and the configured loop as CC too, in case either wasn't already on the thread
+            ccList = [...new Set([...ccList, ...driEmails])].filter(e => !toList.some(t => t.toLowerCase() === e.toLowerCase()));
+          }
         }
-      }catch(e){ /* thread lookup failed — falls back to a plain new email below */ }
+      }catch(e){ /* thread lookup failed — falls back to DRI-only send below */ }
     }
 
     const mime = buildMimeMessage({
-      to: driEmails.join(','), cc: ccInput, subject, htmlBody: html, plainBody: plain, inReplyTo, references
+      to: toList.join(','), cc: ccList.join(','), subject, htmlBody: html, plainBody: plain, inReplyTo, references
     });
     const payload = { raw: base64UrlEncode(mime) };
     if(threadId) payload.threadId = threadId;
@@ -1549,7 +1563,7 @@ async function sendReminderNow(){
     await persistMom();
 
     btn.disabled = false; btn.textContent = origLabel;
-    alert('Sent.\nTo: ' + driEmails.join(', ') + (ccInput ? '\nCC: ' + ccInput : ''));
+    alert('Sent.\nTo: ' + toList.join(', ') + (ccList.length ? '\nCC: ' + ccList.join(', ') : ''));
     closeReminderPreview();
   }catch(e){
     btn.disabled = false; btn.textContent = origLabel;
@@ -1946,371 +1960,3 @@ async function saveToGoogleDrive(){
 </script>
 </body>
 </html>
-// Settings" screen and take effect here automatically, no script edits needed for those.
-// ============================================================
-
-const FIREBASE_PROJECT_ID = 'oba-inspection'; // same project ID as in your web app's FIREBASE_CONFIG
-const FIRESTORE_BASE = 'https://firestore.googleapis.com/v1/projects/' + FIREBASE_PROJECT_ID + '/databases/(default)/documents';
-
-// ---------- SETUP: pick an EXISTING Google Contacts group to CC ----------
-// This one stays here (not in the web app) because it's your own Google account's data.
-// Run `listMyContactGroups` once to see your exact group names in View -> Logs.
-// ---------- Email loop (Google Contacts group) ----------
-// Now lives in shared config (config:reminders in Firestore), editable from the web app's
-// Reminder Settings screen — same group used there for manual "Send Now" too. This constant
-// is only a fallback, used if the config doc has no ccGroupName set yet.
-const EMAIL_LOOP_GROUP_NAME_FALLBACK = 'MOM Reminder Loop';
-
-const REMINDER_CONFIG_DEFAULTS_ = {
-  emailIntro: 'This is an automated status check for meeting "{meetingName}" ({ref}). The following points are still open. Please reply to this email with the current status and, if needed, a revised target date for each item below.',
-  emailClosing: 'Sent automatically by MOM Tracker on behalf of {createdByName}.',
-  repeatEveryDays: 1,
-  scheduleLabel: '9:00 AM IST, daily',
-  ccGroupName: 'MOM Reminder Loop',
-  lastRunAt: null
-};
-
-const STATUS_COLORS_ = {
-  Open:       { bg: 'DCEBFF', fg: '1D5FAE' },
-  InProgress: { bg: 'FFF1D6', fg: 'A9660A' },
-  Paused:     { bg: 'EDE5FF', fg: '6A4FCB' },
-  Closed:     { bg: 'DFF5E8', fg: '1C8A55' }
-};
-const DAY_COLORS_ = {
-  over:  { bg: 'FBDADA', fg: 'B3261E' },
-  soon:  { bg: 'FFF1D6', fg: 'A9660A' },
-  ok:    { bg: 'DFF5E8', fg: '1C8A55' },
-  paused:{ bg: 'EDE5FF', fg: '6A4FCB' }
-};
-
-function sendDailyReminders() {
-  const token = ScriptApp.getOAuthToken();
-  const config = getReminderConfig_(token);
-  const moms = listMomDocs_(token);
-  const todayStr = Utilities.formatDate(new Date(), Session.getScriptTimeZone(), 'yyyy-MM-dd');
-  const today = new Date(todayStr + 'T00:00:00');
-
-  moms.forEach(function (entry) {
-    const mom = entry.mom;
-    const openPoints = (mom.points || []).filter(function (p) { return p.status !== 'Closed'; });
-    if (openPoints.length === 0) return;
-
-    const enriched = openPoints.map(function (p) {
-      const targetStr = p.targetHistory[p.targetHistory.length - 1].date;
-      const targetDate = new Date(targetStr + 'T00:00:00');
-      const daysUntil = Math.round((targetDate - today) / 86400000); // negative = overdue
-      return { p: p, targetStr: targetStr, daysUntil: daysUntil };
-    });
-
-    const hasOverdue = enriched.some(function (x) {
-      return x.p.status !== 'Paused' && x.daysUntil < 0;
-    });
-    if (!hasOverdue) return;
-
-    const daysSinceLastDigest = mom.lastDigestSentOn
-      ? Math.round((today - new Date(mom.lastDigestSentOn + 'T00:00:00')) / 86400000)
-      : Infinity;
-    if (daysSinceLastDigest < config.repeatEveryDays) return;
-
-    const driEmails = uniq_(openPoints.map(function (p) { return p.driEmail; }).filter(Boolean));
-    if (driEmails.length === 0) return;
-
-    const overdueCount = enriched.filter(function (x) { return x.p.status !== 'Paused' && x.daysUntil < 0; }).length;
-    const subject = 'MOM Update Needed: ' + mom.ref + ' — ' + overdueCount + ' point(s) overdue';
-    const htmlBody = buildDigestHtml_(mom, enriched, config);
-    const plainBody = buildDigestPlainText_(mom, enriched, config); // fallback for clients that don't render HTML
-    const loopCc = getEmailLoopAddresses_(config.ccGroupName).join(',');
-
-    try {
-      const thread = resolveLinkedThread_(mom);
-      if (thread) {
-        thread.replyAll(plainBody, { htmlBody: htmlBody, cc: loopCc });
-        if (mom.linkedThreadId !== thread.getId()) {
-          mom.linkedThreadId = thread.getId();
-        }
-        Logger.log('Replied inside linked thread for ' + mom.ref);
-      } else {
-        GmailApp.sendEmail(driEmails.join(','), subject, plainBody, { htmlBody: htmlBody, cc: loopCc });
-        if (mom.linkedThreadQuery) {
-          Logger.log('Linked thread not found for ' + mom.ref + ' (query: "' + mom.linkedThreadQuery + '") — sent as new email instead.');
-        }
-      }
-      mom.lastDigestSentOn = todayStr;
-      updateMomDoc_(token, entry.docName, mom);
-    } catch (e) {
-      Logger.log('Failed to send digest for ' + mom.ref + ': ' + e);
-    }
-  });
-
-  // Record that this run actually happened, so the web app's Reminder Settings screen
-  // can show real confirmation instead of just a static configured schedule.
-  config.lastRunAt = new Date().toISOString();
-  updateConfigDoc_(token, config);
-}
-
-// ---------- Email content builders (mirrors the web app's preview exactly) ----------
-
-function substitutePlaceholders_(text, mom) {
-  return (text || '')
-    .replace(/\{meetingName\}/g, mom.meetingName || '')
-    .replace(/\{ref\}/g, mom.ref || '')
-    .replace(/\{createdByName\}/g, mom.createdByName || 'the meeting owner');
-}
-
-function fmtDate_(dateStr) {
-  const d = new Date(dateStr + 'T00:00:00');
-  return Utilities.formatDate(d, Session.getScriptTimeZone(), 'dd MMM yyyy');
-}
-
-function dayTagFor_(p, x) {
-  if (p.status === 'Closed') return { label: 'Closed', cls: 'ok' };
-  if (p.status === 'Paused') return { label: 'Paused', cls: 'paused' };
-  if (x.daysUntil < 0) return { label: Math.abs(x.daysUntil) + 'd overdue', cls: 'over' };
-  if (x.daysUntil <= 2) return { label: x.daysUntil + 'd left', cls: 'soon' };
-  return { label: x.daysUntil + 'd left', cls: 'ok' };
-}
-
-function escapeHtml_(s) {
-  return String(s || '').replace(/[&<>"']/g, function (c) {
-    return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c];
-  });
-}
-
-function buildDigestHtml_(mom, enriched, config) {
-  const intro = escapeHtml_(substitutePlaceholders_(config.emailIntro, mom)).replace(/\n/g, '<br>');
-  const closing = escapeHtml_(substitutePlaceholders_(config.emailClosing, mom)).replace(/\n/g, '<br>');
-
-  const rows = enriched.map(function (x, i) {
-    const p = x.p;
-    const tag = dayTagFor_(p, x);
-    const isOverdue = tag.cls === 'over';
-    const bg = isOverdue ? '#FBDADA' : (i % 2 ? '#F6F8FA' : '#FFFFFF');
-    const statusColor = STATUS_COLORS_[p.status] || STATUS_COLORS_.Open;
-    const dayColor = DAY_COLORS_[tag.cls] || DAY_COLORS_.ok;
-    return '<tr style="background:' + bg + ';">' +
-      '<td style="padding:8px;border:1px solid #ddd;">' + (i + 1) + '</td>' +
-      '<td style="padding:8px;border:1px solid #ddd;">' + escapeHtml_(p.category) + '</td>' +
-      '<td style="padding:8px;border:1px solid #ddd;">' + escapeHtml_(p.text) + '</td>' +
-      '<td style="padding:8px;border:1px solid #ddd;">' + escapeHtml_(p.driName) + '<br><span style="color:#666;font-size:12px;">' + escapeHtml_(p.driEmail) + '</span></td>' +
-      '<td style="padding:8px;border:1px solid #ddd;">' + fmtDate_(x.targetStr) + '</td>' +
-      '<td style="padding:8px;border:1px solid #ddd;"><span style="padding:2px 8px;border-radius:10px;background:#' + statusColor.bg + ';color:#' + statusColor.fg + ';font-weight:bold;font-size:12px;">' + p.status + '</span></td>' +
-      '<td style="padding:8px;border:1px solid #ddd;"><span style="color:#' + dayColor.fg + ';font-weight:bold;">' + tag.label + '</span></td>' +
-      '</tr>';
-  }).join('');
-
-  return '<div style="font-family:Arial,sans-serif;font-size:14px;color:#1a1a1a;line-height:1.5;">' +
-    '<p>' + intro + '</p>' +
-    '<table style="border-collapse:collapse;width:100%;margin:16px 0;font-size:13px;">' +
-    '<thead><tr style="background:#2C3E50;color:#fff;">' +
-    '<th style="padding:8px;border:1px solid #ddd;text-align:left;">#</th>' +
-    '<th style="padding:8px;border:1px solid #ddd;text-align:left;">Category</th>' +
-    '<th style="padding:8px;border:1px solid #ddd;text-align:left;">Discussion Point</th>' +
-    '<th style="padding:8px;border:1px solid #ddd;text-align:left;">DRI</th>' +
-    '<th style="padding:8px;border:1px solid #ddd;text-align:left;">Target Date</th>' +
-    '<th style="padding:8px;border:1px solid #ddd;text-align:left;">Status</th>' +
-    '<th style="padding:8px;border:1px solid #ddd;text-align:left;">Days</th>' +
-    '</tr></thead><tbody>' + rows + '</tbody></table>' +
-    '<p>' + closing + '</p></div>';
-}
-
-// Plain-text version, required as the fallback `body` alongside htmlBody
-function buildDigestPlainText_(mom, enriched, config) {
-  const lines = [];
-  lines.push(substitutePlaceholders_(config.emailIntro, mom));
-  lines.push('');
-  enriched.forEach(function (x, i) {
-    const p = x.p;
-    const tag = dayTagFor_(p, x);
-    lines.push((i + 1) + '. [' + p.category + '] ' + p.text);
-    lines.push('   DRI: ' + p.driName + ' <' + p.driEmail + '>   Target: ' + x.targetStr + ' (' + tag.label + ')   Status: ' + p.status);
-    lines.push('');
-  });
-  lines.push(substitutePlaceholders_(config.emailClosing, mom));
-  lines.push('');
-  lines.push('(This email also contains a formatted table — view in an HTML-capable mail client if the above looks plain.)');
-  return lines.join('\n');
-}
-
-function uniq_(arr) {
-  const seen = {};
-  const out = [];
-  arr.forEach(function (v) {
-    const key = (v || '').toLowerCase();
-    if (key && !seen[key]) { seen[key] = true; out.push(v); }
-  });
-  return out;
-}
-
-// ---------- Contacts (email loop) ----------
-// Uses the People API directly via UrlFetchApp — the older built-in ContactsApp service
-// relied on Google's legacy Contacts API, which Google has since shut down entirely.
-
-function getEmailLoopAddresses_(groupName) {
-  const name = groupName || EMAIL_LOOP_GROUP_NAME_FALLBACK;
-  if (!name) return [];
-  const token = ScriptApp.getOAuthToken();
-  try {
-    const groupsRes = UrlFetchApp.fetch('https://people.googleapis.com/v1/contactGroups?pageSize=200', {
-      headers: { Authorization: 'Bearer ' + token },
-      muteHttpExceptions: true
-    });
-    if (groupsRes.getResponseCode() !== 200) {
-      Logger.log('Could not list Contacts groups: ' + groupsRes.getContentText());
-      return [];
-    }
-    const groupsData = JSON.parse(groupsRes.getContentText());
-    const match = (groupsData.contactGroups || []).find(function (g) {
-      return (g.name || '').toLowerCase() === name.toLowerCase();
-    });
-    if (!match) {
-      Logger.log('No contact group found named "' + name + '" — sending with no CC loop. Run listMyContactGroups() to see available names.');
-      return [];
-    }
-
-    const detailRes = UrlFetchApp.fetch('https://people.googleapis.com/v1/' + match.resourceName + '?maxMembers=1000', {
-      headers: { Authorization: 'Bearer ' + token },
-      muteHttpExceptions: true
-    });
-    if (detailRes.getResponseCode() !== 200) return [];
-    const detailData = JSON.parse(detailRes.getContentText());
-    const memberIds = detailData.memberResourceNames || [];
-    if (memberIds.length === 0) return [];
-
-    const emails = [];
-    for (let i = 0; i < memberIds.length; i += 200) {
-      const chunk = memberIds.slice(i, i + 200);
-      const params = chunk.map(function (id) { return 'resourceNames=' + encodeURIComponent(id); }).join('&');
-      const peopleRes = UrlFetchApp.fetch('https://people.googleapis.com/v1/people:batchGet?' + params + '&personFields=emailAddresses', {
-        headers: { Authorization: 'Bearer ' + token },
-        muteHttpExceptions: true
-      });
-      if (peopleRes.getResponseCode() !== 200) continue;
-      const peopleData = JSON.parse(peopleRes.getContentText());
-      (peopleData.responses || []).forEach(function (r) {
-        if (r.person && r.person.emailAddresses && r.person.emailAddresses.length) {
-          emails.push(r.person.emailAddresses[0].value);
-        }
-      });
-    }
-    return uniq_(emails);
-  } catch (e) {
-    Logger.log('Could not read contact group "' + name + '": ' + e);
-    return [];
-  }
-}
-
-function listMyContactGroups() {
-  const token = ScriptApp.getOAuthToken();
-  const res = UrlFetchApp.fetch('https://people.googleapis.com/v1/contactGroups?pageSize=200', {
-    headers: { Authorization: 'Bearer ' + token },
-    muteHttpExceptions: true
-  });
-  if (res.getResponseCode() !== 200) {
-    Logger.log('Could not list groups: ' + res.getContentText());
-    return;
-  }
-  const data = JSON.parse(res.getContentText());
-  (data.contactGroups || []).forEach(function (g) { Logger.log(g.name); });
-}
-
-// ---------- Linked email thread ----------
-
-function resolveLinkedThread_(mom) {
-  if (mom.linkedThreadId) {
-    try {
-      const t = GmailApp.getThreadById(mom.linkedThreadId);
-      if (t) return t;
-    } catch (e) { /* cached ID no longer valid, fall through to search */ }
-  }
-  if (mom.linkedThreadQuery) {
-    const found = GmailApp.search(mom.linkedThreadQuery, 0, 1);
-    if (found.length > 0) return found[0];
-  }
-  return null;
-}
-
-// ---------- Firestore REST helpers ----------
-
-function listMomDocs_(token) {
-  const results = [];
-  let pageToken = null;
-  do {
-    let url = FIRESTORE_BASE + '/momtracker?pageSize=300';
-    if (pageToken) url += '&pageToken=' + encodeURIComponent(pageToken);
-    const res = UrlFetchApp.fetch(url, {
-      headers: { Authorization: 'Bearer ' + token },
-      muteHttpExceptions: true
-    });
-    const data = JSON.parse(res.getContentText());
-    (data.documents || []).forEach(function (doc) {
-      const docId = doc.name.split('/').pop();
-      if (docId.indexOf('mom:') !== 0) return; // skip config:, dri-contacts, mom-counter, etc.
-      const rawValue = doc.fields && doc.fields.value && doc.fields.value.stringValue;
-      if (!rawValue) return;
-      try {
-        results.push({ docName: doc.name, mom: JSON.parse(rawValue) });
-      } catch (e) { /* skip malformed doc */ }
-    });
-    pageToken = data.nextPageToken || null;
-  } while (pageToken);
-  return results;
-}
-
-function updateMomDoc_(token, docName, mom) {
-  const url = 'https://firestore.googleapis.com/v1/' + docName + '?updateMask.fieldPaths=value';
-  const body = { fields: { value: { stringValue: JSON.stringify(mom) } } };
-  UrlFetchApp.fetch(url, {
-    method: 'patch',
-    headers: { Authorization: 'Bearer ' + token },
-    contentType: 'application/json',
-    payload: JSON.stringify(body),
-    muteHttpExceptions: true
-  });
-}
-
-function getReminderConfig_(token) {
-  const url = FIRESTORE_BASE + '/momtracker/config:reminders';
-  const res = UrlFetchApp.fetch(url, {
-    headers: { Authorization: 'Bearer ' + token },
-    muteHttpExceptions: true
-  });
-  if (res.getResponseCode() !== 200) return Object.assign({}, REMINDER_CONFIG_DEFAULTS_);
-  try {
-    const data = JSON.parse(res.getContentText());
-    const raw = data.fields && data.fields.value && data.fields.value.stringValue;
-    if (!raw) return Object.assign({}, REMINDER_CONFIG_DEFAULTS_);
-    return Object.assign({}, REMINDER_CONFIG_DEFAULTS_, JSON.parse(raw));
-  } catch (e) {
-    return Object.assign({}, REMINDER_CONFIG_DEFAULTS_);
-  }
-}
-
-function updateConfigDoc_(token, config) {
-  const url = FIRESTORE_BASE + '/momtracker/config:reminders?updateMask.fieldPaths=value';
-  const body = { fields: { value: { stringValue: JSON.stringify(config) } } };
-  UrlFetchApp.fetch(url, {
-    method: 'patch',
-    headers: { Authorization: 'Bearer ' + token },
-    contentType: 'application/json',
-    payload: JSON.stringify(body),
-    muteHttpExceptions: true
-  });
-}
-
-// ---------- One-time setup helper ----------
-function setupDailyTrigger() {
-  ScriptApp.getProjectTriggers().forEach(function (t) {
-    if (t.getHandlerFunction() === 'sendDailyReminders') ScriptApp.deleteTrigger(t);
-  });
-  ScriptApp.newTrigger('sendDailyReminders')
-    .timeBased()
-    .everyDays(1)
-    .atHour(9) // 9am in your script's timezone — change if you like, and update the
-               // "Schedule label" in the web app's Reminder Settings to match
-    .create();
-  Logger.log('Daily trigger created — MOM digests will be checked automatically every day around 9am.');
-}
-
-function testRunNow() {
-  sendDailyReminders();
-}
