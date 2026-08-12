@@ -210,7 +210,7 @@
 
   <div id="dashboardView">
     <div class="note-banner">
-      Automatic reminder emails run on a schedule outside this app (via Apps Script) — check "Reminder Settings" below to see the schedule, edit the email wording, and confirm when it last ran.
+      Automatic sending is currently switched off — reminders are view/copy only from here. Use the "Preview reminder email" button on any MOM to see and copy the content; paste it into your own email. Check "Reminder Settings" below for wording and status.
       Check the badge next to your name above: "☁ Shared (cloud)" means everyone sees the same live data; "💻 This browser only" means data is local to this device until cloud storage is configured.
     </div>
     <div class="toolbar">
@@ -1452,9 +1452,9 @@ async function openReminderSettings(){
   const statusEl = document.getElementById('reminderStatusBox');
   if(config.lastRunAt){
     const last = new Date(config.lastRunAt);
-    statusEl.innerHTML = '✓ Automation last confirmed running: <b style="color:var(--text);">' + last.toLocaleString('en-GB') + '</b><br>Configured schedule: <b style="color:var(--text);">' + escapeHtml(config.scheduleLabel) + '</b>';
+    statusEl.innerHTML = 'Automation is currently switched off. Last time it ran automatically: <b style="color:var(--text);">' + last.toLocaleString('en-GB') + '</b><br>To turn it back on, run <code>setupDailyTrigger</code> in Apps Script.';
   } else {
-    statusEl.innerHTML = 'No confirmed automatic run yet. Once your Apps Script trigger fires (or you run <code>testRunNow</code>), this will show the last confirmed check-in time.<br>Configured schedule: <b style="color:var(--text);">' + escapeHtml(config.scheduleLabel) + '</b>';
+    statusEl.innerHTML = 'Automation is switched off — no automatic emails will be sent. Use "Preview reminder email" on any MOM to view and copy content manually instead.';
   }
 
   document.getElementById('reminderSettingsModal').classList.remove('hidden');
